@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crosslearn"
+version = "0.3.0"
+description = "Extractor-first RL utilities for Gymnasium, SB3, and Chronos-backed time-series features."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["reinforcement-learning", "stable-baselines3", "gymnasium", "chronos", "atari"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.2",
+  "gymnasium>=0.29",
+  "stable-baselines3>=2.3.0",
+]
+
+[project.optional-dependencies]
+atari = [
+  "ale-py>=0.10",
+  "shimmy[atari]>=2.0",
+]
+chronos = [
+  "transformers>=4.40",
+  "huggingface-hub>=0.22",
+  "chronos-forecasting>=2.1.0",
+]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "build>=1.2",
+]
+extra = [
+  "transformers>=4.40",
+  "huggingface-hub>=0.22",
+  "chronos-forecasting>=2.1.0",
+  "ale-py>=0.10",
+  "shimmy[atari]>=2.0",
+  "tensorboard>=2.14",
+  "wandb>=0.16",
+  "tqdm>=4.66",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["crosslearn*"]
+exclude = ["examples*", "tests*"]
