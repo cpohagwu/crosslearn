@@ -25,7 +25,7 @@ setup(
     name="crosslearn",
     version=read_version(),
     description=(
-        "Extractor-first RL utilities for Gymnasium, SB3, and Chronos-backed time-series features"
+        "Reusable representation extractors for reinforcement learning across vectors, images, and Chronos-backed time-series windows"
     ),
     long_description=read_readme(),
     long_description_content_type="text/markdown",

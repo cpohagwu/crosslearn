@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crosslearn"
 version = "0.3.0"
-description = "Extractor-first RL utilities for Gymnasium, SB3, and Chronos-backed time-series features."
+description = "Reusable representation extractors for reinforcement learning across vectors, images, and Chronos-backed time-series windows."
 readme = "README.md"
 requires-python = ">=3.10"
-keywords = ["reinforcement-learning", "stable-baselines3", "gymnasium", "chronos", "atari"]
+keywords = ["reinforcement-learning", "stable-baselines3", "gymnasium", "chronos", "feature-extraction", "time-series"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -17,6 +17,11 @@ classifiers = [
   "Operating System :: OS Independent",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
+[project.urls]
+Homepage = "https://github.com/cpohagwu/crosslearn"
+Repository = "https://github.com/cpohagwu/crosslearn"
+Issues = "https://github.com/cpohagwu/crosslearn/issues"
 dependencies = [
   "numpy>=1.24",
   "torch>=2.2",
