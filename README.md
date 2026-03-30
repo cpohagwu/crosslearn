@@ -1,7 +1,7 @@
 <div align="center">
   <a href="https://github.com/cpohagwu/crosslearn">
     <img
-      src="https://raw.githubusercontent.com/cpohagwu/crosslearn/main/docs/_static/crosslearn.png"
+      src="https://github.com/cpohagwu/crosslearn/blob/main/docs/_static/crosslearn.png?raw=true"
       alt="crosslearn logo"
       width="900"
     >
@@ -24,7 +24,9 @@ time-series windows a shared feature-extraction interface that works with both n
 
 <div align="center">
 
-[![License](https://img.shields.io/github/license/cpohagwu/crosslearn?style=for-the-badge)](https://github.com/cpohagwu/crosslearn/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-D22128?style=for-the-badge&logo=apache&logoColor=white)](https://github.com/cpohagwu/crosslearn/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/crosslearn?style=for-the-badge&logo=pypi&logoColor=white&label=PyPI&color=3775A9)](https://pypi.org/project/crosslearn/)
+[![Downloads](https://img.shields.io/pypi/dm/crosslearn?style=for-the-badge&logo=pypi&logoColor=white&label=Downloads&color=3775A9)](https://pypistats.org/packages/crosslearn)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#installation)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.2%2B-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](#installation)
 [![Gymnasium](https://img.shields.io/badge/Gymnasium-0.29%2B-1f6feb?style=for-the-badge)](https://gymnasium.farama.org/)
@@ -88,13 +90,13 @@ The Chronos utilities are designed for practical RL use:
 
 Checkout the Colab quickstarts for runnable examples of native and SB3 training with vector, image, and time-series observations:
 
-| Notebook | Focus | Colab | Source |
-| --- | --- | --- | --- |
-| Native REINFORCE quickstart | Shortest path from `make_vec_env` to a working policy-gradient baseline on `CartPole-v1` or `LunarLander-v3`. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/01_cartpole-lunarlander_reinforce.ipynb) | [examples/01_cartpole-lunarlander_reinforce.ipynb](https://github.com/cpohagwu/crosslearn/blob/main/examples/01_cartpole-lunarlander_reinforce.ipynb) |
-| Atari REINFORCE with Nature CNN | Native Atari training with `AtariPreprocessor` and `NatureCNNExtractor`. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/02_atari_reinforce_cnn.ipynb) | [examples/02_atari_reinforce_cnn.ipynb](https://github.com/cpohagwu/crosslearn/blob/main/examples/02_atari_reinforce_cnn.ipynb) |
-| Atari PPO with the package CNN extractor | SB3 `PPO` using the same image backbone interface. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/03_atari_sb3_cnn.ipynb) | [examples/03_atari_sb3_cnn.ipynb](https://github.com/cpohagwu/crosslearn/blob/main/examples/03_atari_sb3_cnn.ipynb) |
-| Chronos-2 trading features with native REINFORCE | Online and offline Chronos workflows over rolling OHLCV windows. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) | [examples/04_gym-anytrading_reinforce_chronos2.ipynb](https://github.com/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) |
-| Chronos-2 trading features with SB3 PPO | The same Chronos representation path plugged into SB3. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/05_gym-anytrading_sb3_chronos2.ipynb) | [examples/05_gym-anytrading_sb3_chronos2.ipynb](https://github.com/cpohagwu/crosslearn/blob/main/examples/05_gym-anytrading_sb3_chronos2.ipynb) |
+| Notebook | Focus | Colab |
+| --- | --- | --- |
+| Native REINFORCE quickstart | Shortest path from `make_vec_env` to a working policy-gradient baseline on `CartPole-v1` or `LunarLander-v3`. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/01_cartpole-lunarlander_reinforce.ipynb) |
+| Atari REINFORCE with Nature CNN | Native Atari training with `AtariPreprocessor` and `NatureCNNExtractor`. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/02_atari_reinforce_cnn.ipynb) |
+| Atari PPO with the package CNN extractor | SB3 `PPO` using the same image backbone interface. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/03_atari_sb3_cnn.ipynb) |
+| Chronos-2 trading features with native REINFORCE | Online and offline Chronos workflows over rolling OHLCV windows. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) |
+| Chronos-2 trading features with SB3 PPO | The same Chronos representation path plugged into SB3. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/05_gym-anytrading_sb3_chronos2.ipynb) |
 
 ## Installation
 

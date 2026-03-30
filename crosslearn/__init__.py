@@ -19,7 +19,7 @@ from crosslearn.extractors import (
     NatureCNNExtractor,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.6"
 
 __all__ = [
     "REINFORCE",

@@ -4,10 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crosslearn"
-version = "0.3.0"
+dynamic = ["version"]
 description = "Reusable representation extractors for reinforcement learning across vectors, images, and Chronos-backed time-series windows."
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.2",
+  "gymnasium>=0.29",
+  "stable-baselines3>=2.3.0",
+]
 keywords = ["reinforcement-learning", "stable-baselines3", "gymnasium", "chronos", "feature-extraction", "time-series"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -22,17 +28,14 @@ classifiers = [
 Homepage = "https://github.com/cpohagwu/crosslearn"
 Repository = "https://github.com/cpohagwu/crosslearn"
 Issues = "https://github.com/cpohagwu/crosslearn/issues"
-dependencies = [
-  "numpy>=1.24",
-  "torch>=2.2",
-  "gymnasium>=0.29",
-  "stable-baselines3>=2.3.0",
-]
 
 [project.optional-dependencies]
 atari = [
   "ale-py>=0.10",
-  "shimmy[atari]>=2.0",
+  "gymnasium[atari]>=0.29",
+  "gymnasium[accept-rom-license]>=0.29",
+  "gymnasium[other]",
+  "pygame>=2.5",
 ]
 chronos = [
   "transformers>=4.40",
@@ -50,13 +53,19 @@ extra = [
   "huggingface-hub>=0.22",
   "chronos-forecasting>=2.1.0",
   "ale-py>=0.10",
-  "shimmy[atari]>=2.0",
   "tensorboard>=2.14",
   "wandb>=0.16",
   "tqdm>=4.66",
+  "gymnasium[atari]>=0.29",
+  "gymnasium[accept-rom-license]>=0.29",
+  "gymnasium[other]",
+  "pygame>=2.5",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["crosslearn*"]
 exclude = ["examples*", "tests*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "crosslearn.__version__"}
