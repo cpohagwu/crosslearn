@@ -67,6 +67,9 @@ class REINFORCE(BaseAgent):
         lr_scheduler_class: Optional LR scheduler class.
         lr_scheduler_kwargs: Kwargs for the scheduler.
         device: ``"auto"``, ``"cpu"``, or ``"cuda"``.
+        use_async_env: Forwarded to ``make_vec_env()`` when ``env`` is not
+            already vectorized. Use for slower environments where multi-process
+            stepping can hide CPU-side rollout latency.
         logger: Optional logger.
         verbose: 0 = silent, 1 = info, 2 = debug every update.
         seed: Random seed.
@@ -126,6 +129,7 @@ class REINFORCE(BaseAgent):
         lr_scheduler_class: Optional[Type] = None,
         lr_scheduler_kwargs: Optional[Dict] = None,
         device: str = "auto",
+        use_async_env: bool = False,
         logger: Optional[BaseLogger] = None,
         verbose: int = 1,
         seed: Optional[int] = None,
@@ -149,6 +153,7 @@ class REINFORCE(BaseAgent):
             gamma=gamma,
             learning_rate=learning_rate,
             device=device,
+            use_async_env=use_async_env,
             logger=logger,
             verbose=verbose,
             seed=seed,
@@ -177,7 +182,7 @@ class REINFORCE(BaseAgent):
             observation_space=self.observation_space,
             action_space=self.action_space,
             features_extractor_class=self.features_extractor_class,
-            features_extractor_kwargs=self.features_extractor_kwargs,
+            features_extractor_kwargs=self._resolve_features_extractor_kwargs(),
             **self.policy_kwargs,
         ).to(self.device)
 

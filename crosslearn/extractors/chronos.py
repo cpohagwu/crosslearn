@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from crosslearn._devices import resolve_device_map
 from crosslearn.extractors.base import BaseFeaturesExtractor
 
 PoolingMode: TypeAlias = Literal["mean", "last"]
@@ -25,7 +26,7 @@ _DATAFRAME_PROGRESS_BATCH_SIZE = 256
 def _load_pipeline(
     model_name: str,
     *,
-    device_map: str = "cpu",
+    device_map: str = "auto",
     dtype: torch.dtype = torch.float32,
 ) -> Any:
     """Load a Chronos pipeline while handling old/new dtype kwargs."""
@@ -38,7 +39,10 @@ def _load_pipeline(
             "  pip install 'crosslearn[chronos]'"
         ) from exc
 
-    kwargs: dict[str, Any] = {"device_map": device_map, "dtype": dtype}
+    kwargs: dict[str, Any] = {
+        "device_map": resolve_device_map(device_map),
+        "dtype": dtype,
+    }
     try:
         return BaseChronosPipeline.from_pretrained(model_name, **kwargs)
     except TypeError:
@@ -328,7 +332,7 @@ class ChronosEmbedder:
         feature_names: Sequence[str] | None = None,
         selected_columns: Sequence[str] | None = None,
         selected_indices: Sequence[int] | None = None,
-        device_map: str = "cpu",
+        device_map: str = "auto",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         if pooling not in {"mean", "last"}:
@@ -345,10 +349,10 @@ class ChronosEmbedder:
             if selected_indices is not None
             else None
         )
-        self.device_map = device_map
+        self.device_map = resolve_device_map(device_map)
         self.dtype = dtype
 
-        self.pipeline = _load_pipeline(model_name, device_map=device_map, dtype=dtype)
+        self.pipeline = _load_pipeline(model_name, device_map=self.device_map, dtype=dtype)
         self.pipeline_device = _infer_pipeline_device(self.pipeline)
         self.embedding_dim: int | None = None
 
@@ -388,25 +392,28 @@ class ChronosEmbedder:
             total_n_features=inferred_features,
             feature_names=feature_names,
         )
+        selected_windows = normalized_windows[..., selected_indices]
+        if selected_windows.device != self.pipeline_device:
+            selected_windows = selected_windows.to(self.pipeline_device)
 
         with torch.no_grad():
-            result = self.pipeline.embed(
-                normalized_windows[..., selected_indices].to(self.pipeline_device)
-            )
+            result = self.pipeline.embed(selected_windows)
 
         embeddings = result[0] if isinstance(result, tuple) else result
         pooled = _pool_embeddings(embeddings, self.pooling).to(dtype=torch.float32)
         self.embedding_dim = int(pooled.shape[-1])
-
-        target_device = (
-            torch.device(output_device)
-            if output_device is not None
-            else torch.device("cpu")
-        )
-        pooled = pooled.to(target_device)
         if as_tensor:
+            target_device = (
+                torch.device(output_device)
+                if output_device is not None
+                else self.pipeline_device
+            )
+            if pooled.device != target_device:
+                pooled = pooled.to(target_device)
             return pooled
-        return pooled.cpu().numpy().astype(np.float32, copy=False)
+        if pooled.device.type != "cpu":
+            pooled = pooled.cpu()
+        return pooled.numpy().astype(np.float32, copy=False)
 
     def _embed_dataframe_windows(
         self,
@@ -539,7 +546,7 @@ class ChronosExtractor(BaseFeaturesExtractor):
         feature_names: Sequence[str] | None = None,
         selected_columns: Sequence[str] | None = None,
         selected_indices: Sequence[int] | None = None,
-        device_map: str = "cpu",
+        device_map: str = "auto",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(observation_space, features_dim or 1)

@@ -4,13 +4,14 @@ from abc import ABC, abstractmethod
 from collections import deque
 import inspect
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import gymnasium as gym
 
+from crosslearn._devices import resolve_device, resolve_device_map
 from crosslearn.callbacks import BaseCallback, CallbackList, EpisodeSolvedCallback
 from crosslearn.envs.utils import make_vec_env
 from crosslearn.extractors.base import BaseFeaturesExtractor
@@ -43,6 +44,8 @@ class BaseAgent(ABC):
         gamma: Discount factor. Default: 0.99.
         learning_rate: Optimiser initial LR. Default: 3e-4.
         device: ``"auto"``, ``"cpu"``, or ``"cuda"``.
+        use_async_env: Forwarded to ``make_vec_env()`` when the agent builds
+            the vector env itself.
         logger: Optional ``BaseLogger`` instance.
         verbose: 0 = silent, 1 = info, 2 = debug (prints every metric).
         seed: Optional random seed.
@@ -50,7 +53,7 @@ class BaseAgent(ABC):
 
     def __init__(
         self,
-        env: Union[str, gym.Env, gym.vector.VectorEnv],
+        env: Union[str, gym.Env, gym.vector.VectorEnv, Callable],
         n_envs: int = 1,
         policy_kwargs: Optional[Dict] = None,
         features_extractor_class: Type[BaseFeaturesExtractor] = FlattenExtractor,
@@ -58,12 +61,17 @@ class BaseAgent(ABC):
         gamma: float = 0.99,
         learning_rate: float = 3e-4,
         device: str = "auto",
+        use_async_env: bool = False,
         logger: Optional[BaseLogger] = None,
         verbose: int = 1,
         seed: Optional[int] = None,
     ) -> None:
         # ── Vectorise environment ──────────────────────────────────────
-        self.env: gym.vector.VectorEnv = make_vec_env(env, n_envs=n_envs)
+        self.env: gym.vector.VectorEnv = make_vec_env(
+            env,
+            n_envs=n_envs,
+            use_async=use_async_env,
+        )
         self.n_envs: int = self.env.num_envs
 
         # Single-env spaces used for policy construction
@@ -76,15 +84,13 @@ class BaseAgent(ABC):
         self.verbose = verbose
         self.seed = seed
         self.logger = logger
+        self.use_async_env = use_async_env
         self.policy_kwargs = policy_kwargs or {}
         self.features_extractor_class = features_extractor_class
         self.features_extractor_kwargs = features_extractor_kwargs or {}
 
         # ── Device ────────────────────────────────────────────────────
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-            if device == "auto" else device
-        )
+        self.device = resolve_device(device)
 
         # ── Reproducibility ────────────────────────────────────────────
         if seed is not None:
@@ -395,17 +401,17 @@ class BaseAgent(ABC):
             "gamma": self.gamma,
             "learning_rate": self.learning_rate,
             "n_envs": self.n_envs,
+            "use_async_env": self.use_async_env,
             "policy_kwargs": self.policy_kwargs,
         }
 
     def _default_hyperparams(self) -> Dict:
-        resolved_device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        resolved_device = resolve_device("auto")
         return {
             "gamma": 0.99,
             "learning_rate": 3e-4,
             "n_envs": 1,
+            "use_async_env": False,
             "policy_kwargs": {},
             "features_extractor_class": FlattenExtractor,
             "features_extractor_kwargs": {},
@@ -441,6 +447,7 @@ class BaseAgent(ABC):
             "gamma": self.gamma,
             "learning_rate": self.learning_rate,
             "n_envs": self.n_envs,
+            "use_async_env": self.use_async_env,
             "policy_kwargs": self.policy_kwargs,
             "features_extractor_class": self.features_extractor_class,
             "features_extractor_kwargs": self.features_extractor_kwargs,
@@ -557,6 +564,21 @@ class BaseAgent(ABC):
         if callable(value):
             return f"{value.__module__}.{value.__qualname__}"
         return str(value)
+
+    def _resolve_features_extractor_kwargs(self) -> Dict[str, Any]:
+        kwargs = dict(self.features_extractor_kwargs)
+        try:
+            signature = inspect.signature(self.features_extractor_class.__init__)
+        except (TypeError, ValueError):
+            return kwargs
+
+        if "device_map" not in signature.parameters:
+            return kwargs
+
+        requested_device_map = kwargs.get("device_map", "auto")
+        if requested_device_map == "auto":
+            kwargs["device_map"] = resolve_device_map(self.device)
+        return kwargs
 
     @abstractmethod
     def __repr__(self) -> str: ...

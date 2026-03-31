@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from crosslearn import REINFORCE
 import crosslearn.extractors.chronos as chronos_module
 from crosslearn.extractors.base import BaseFeaturesExtractor
 from crosslearn.extractors.chronos import ChronosEmbedder, ChronosExtractor
@@ -59,6 +60,26 @@ def _install_fake_tqdm(monkeypatch):
     return instances
 
 
+class _TinyChronosEnv(gym.Env):
+    metadata = {}
+
+    def __init__(self) -> None:
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(4, 5),
+            dtype=np.float32,
+        )
+        self.action_space = gym.spaces.Discrete(2)
+
+    def reset(self, *, seed: int | None = None, options=None):
+        super().reset(seed=seed)
+        return np.zeros((4, 5), dtype=np.float32), {}
+
+    def step(self, action: int):
+        return np.zeros((4, 5), dtype=np.float32), 0.0, True, False, {}
+
+
 def test_base_features_extractor_requires_forward_implementation() -> None:
     class MissingForwardExtractor(BaseFeaturesExtractor):
         pass
@@ -72,7 +93,9 @@ def test_base_features_extractor_requires_forward_implementation() -> None:
 
 def test_chronos_extractor_accepts_anytrading_windows_and_selected_columns(
     fake_chronos,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     observation_space = gym.spaces.Box(
         low=-np.inf,
         high=np.inf,
@@ -97,6 +120,30 @@ def test_chronos_extractor_accepts_anytrading_windows_and_selected_columns(
     assert fake_chronos.last_kwargs == {"device_map": "cpu", "dtype": torch.float32}
     assert fake_chronos.last_pipeline is not None
     assert fake_chronos.last_pipeline.calls[-1].shape == (2, 4, 2)
+
+
+def test_reinforce_aligns_default_chronos_device_map_with_cuda_agent(
+    fake_chronos,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.nn.Module, "to", lambda self, *args, **kwargs: self)
+
+    agent = REINFORCE(
+        lambda: _TinyChronosEnv(),
+        n_envs=1,
+        n_steps=1,
+        features_extractor_class=ChronosExtractor,
+        features_extractor_kwargs={
+            "feature_names": ["Open", "High", "Low", "Close", "Volume"],
+            "selected_columns": ["Close", "Volume"],
+        },
+        verbose=0,
+    )
+
+    assert agent.device.type == "cuda"
+    assert fake_chronos.last_model_name == "amazon/chronos-2"
+    assert fake_chronos.last_kwargs == {"device_map": "cuda", "dtype": torch.float32}
 
 
 def test_chronos_embedder_pooling_last_returns_last_token(fake_chronos) -> None:

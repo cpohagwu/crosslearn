@@ -85,6 +85,9 @@ The Chronos utilities are designed for practical RL use:
 - They accept raw 2D rolling windows or flat backward-compatible inputs.
 - They support feature selection by `selected_columns` or `selected_indices`.
 - They expose `mean` and `last` pooling over Chronos token embeddings.
+- They align with CUDA automatically by default when available, so the online
+  Chronos path does not bounce observations through CPU unless you override
+  `device_map`.
 
 ## Quickstart Colab Notebooks
 
@@ -154,6 +157,12 @@ agent = REINFORCE(
 )
 agent.learn(total_timesteps=100_000)
 ```
+
+`ChronosExtractor` follows the agent device automatically by default. That removes the
+largest avoidable CPU/GPU transfer in the online Chronos path, but GPU utilization still
+depends on batch size: use larger `n_envs` than the minimal notebook demos when you want
+wider Chronos inference batches, and only enable async env stepping when environment latency
+is large enough to justify process overhead.
 
 SB3 interoperability with the same extractor contract:
 
