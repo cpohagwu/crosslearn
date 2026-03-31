@@ -107,7 +107,9 @@ pip install "crosslearn[chronos]"
 pip install "crosslearn[extra]"
 ```
 
-`extra` includes packaged optional integrations such as Atari environment support, Chronos foundation-model dependencies, TensorBoard, Weights & Biases, and progress-bar tooling. Notebook-only example dependencies are kept separate.
+`chronos` includes the Chronos foundation-model dependencies plus `tqdm` for offline embedding
+progress bars. `extra` adds those dependencies alongside Atari support, TensorBoard, and
+Weights & Biases. Notebook-only example dependencies are kept separate.
 
 ## Core API
 

@@ -19,6 +19,7 @@ from crosslearn.extractors.base import BaseFeaturesExtractor
 
 PoolingMode: TypeAlias = Literal["mean", "last"]
 WindowInput: TypeAlias = np.ndarray | torch.Tensor | Sequence[float]
+_DATAFRAME_PROGRESS_BATCH_SIZE = 256
 
 
 def _load_pipeline(
@@ -296,6 +297,26 @@ def _make_rolling_windows(values: np.ndarray, lookback: int) -> np.ndarray:
     )
 
 
+def _make_dataframe_progress_bar(total_windows: int) -> Any:
+    try:
+        from tqdm import tqdm
+    except ImportError as exc:
+        raise ImportError(
+            "Chronos dataframe progress bars require tqdm.\n"
+            "Install it directly or via the project extras, for example:\n"
+            "  pip install 'crosslearn[chronos]'\n"
+            "or install tqdm directly:\n"
+            "  pip install tqdm"
+        ) from exc
+
+    return tqdm(
+        total=total_windows,
+        unit="window",
+        desc="Chronos embeddings",
+        dynamic_ncols=True,
+    )
+
+
 class ChronosEmbedder:
     """Frozen Chronos utility for online and offline rolling-window embeddings."""
 
@@ -387,6 +408,44 @@ class ChronosEmbedder:
             return pooled
         return pooled.cpu().numpy().astype(np.float32, copy=False)
 
+    def _embed_dataframe_windows(
+        self,
+        windows: np.ndarray,
+        *,
+        lookback: int,
+        feature_names: Sequence[str],
+        progress_bar: bool,
+    ) -> np.ndarray:
+        if not progress_bar:
+            return self.embed_windows(
+                windows,
+                lookback=lookback,
+                n_features=len(feature_names),
+                feature_names=feature_names,
+                as_tensor=False,
+            )
+
+        total_windows = int(windows.shape[0])
+        progress = _make_dataframe_progress_bar(total_windows)
+        embedding_batches: list[np.ndarray] = []
+        try:
+            for start in range(0, total_windows, _DATAFRAME_PROGRESS_BATCH_SIZE):
+                stop = min(start + _DATAFRAME_PROGRESS_BATCH_SIZE, total_windows)
+                embedding_batches.append(
+                    self.embed_windows(
+                        windows[start:stop],
+                        lookback=lookback,
+                        n_features=len(feature_names),
+                        feature_names=feature_names,
+                        as_tensor=False,
+                    )
+                )
+                progress.update(stop - start)
+        finally:
+            progress.close()
+
+        return np.concatenate(embedding_batches, axis=0)
+
     def transform_dataframe(
         self,
         df: Any,
@@ -394,8 +453,13 @@ class ChronosEmbedder:
         lookback: int,
         columns: Sequence[str] | None = None,
         output_prefix: str = "chronos_",
+        progress_bar: bool = False,
     ) -> Any:
-        """Append aligned Chronos embedding columns to a dataframe."""
+        """Append aligned Chronos embedding columns to a dataframe.
+
+        Set ``progress_bar=True`` to batch the offline embedding pass and show a
+        ``tqdm`` progress bar.
+        """
         try:
             import pandas as pd
         except ImportError as exc:
@@ -428,12 +492,11 @@ class ChronosEmbedder:
             df.loc[:, source_columns].to_numpy(dtype=np.float32, copy=True),
             lookback=lookback,
         )
-        embeddings = self.embed_windows(
+        embeddings = self._embed_dataframe_windows(
             windows,
             lookback=lookback,
-            n_features=len(source_columns),
             feature_names=source_columns,
-            as_tensor=False,
+            progress_bar=progress_bar,
         )
 
         embedding_columns = [

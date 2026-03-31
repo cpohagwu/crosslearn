@@ -1,12 +1,62 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import gymnasium as gym
 import numpy as np
 import pytest
 import torch
 
+import crosslearn.extractors.chronos as chronos_module
 from crosslearn.extractors.base import BaseFeaturesExtractor
 from crosslearn.extractors.chronos import ChronosEmbedder, ChronosExtractor
+
+
+def _make_chronos_dataframe():
+    pd = pytest.importorskip("pandas")
+    return pd.DataFrame(
+        {
+            "Open": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "Close": [2.0, 3.0, 4.0, 5.0, 6.0],
+            "Volume": [10.0, 11.0, 12.0, 13.0, 14.0],
+        }
+    )
+
+
+def _install_fake_tqdm(monkeypatch):
+    instances = []
+
+    class _FakeTqdm:
+        def __init__(self, *, total, unit, desc, dynamic_ncols) -> None:
+            self.total = total
+            self.unit = unit
+            self.desc = desc
+            self.dynamic_ncols = dynamic_ncols
+            self.updates: list[int] = []
+            self.closed = False
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    module = types.ModuleType("tqdm")
+
+    def _tqdm(*, total, unit, desc, dynamic_ncols):
+        bar = _FakeTqdm(
+            total=total,
+            unit=unit,
+            desc=desc,
+            dynamic_ncols=dynamic_ncols,
+        )
+        instances.append(bar)
+        return bar
+
+    module.tqdm = _tqdm
+    monkeypatch.setitem(sys.modules, "tqdm", module)
+    return instances
 
 
 def test_base_features_extractor_requires_forward_implementation() -> None:
@@ -161,14 +211,7 @@ def test_chronos_embedder_transform_dataframe_requires_pandas(
 def test_chronos_embedder_dataframe_alignment_matches_extractor(
     fake_chronos,
 ) -> None:
-    pd = pytest.importorskip("pandas")
-    df = pd.DataFrame(
-        {
-            "Open": [1.0, 2.0, 3.0, 4.0, 5.0],
-            "Close": [2.0, 3.0, 4.0, 5.0, 6.0],
-            "Volume": [10.0, 11.0, 12.0, 13.0, 14.0],
-        }
-    )
+    df = _make_chronos_dataframe()
     lookback = 3
 
     embedder = ChronosEmbedder(
@@ -206,3 +249,105 @@ def test_chronos_embedder_dataframe_alignment_matches_extractor(
     )
 
     np.testing.assert_allclose(offline_embeddings, online_embeddings)
+
+
+def test_chronos_embedder_transform_dataframe_progress_bar_matches_default(
+    fake_chronos,
+    monkeypatch,
+) -> None:
+    df = _make_chronos_dataframe()
+    _install_fake_tqdm(monkeypatch)
+
+    base_embedder = ChronosEmbedder(
+        feature_names=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+    )
+    progress_embedder = ChronosEmbedder(
+        feature_names=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+    )
+
+    transformed = base_embedder.transform_dataframe(
+        df,
+        lookback=3,
+        columns=["Open", "Close", "Volume"],
+    )
+    transformed_with_progress = progress_embedder.transform_dataframe(
+        df,
+        lookback=3,
+        columns=["Open", "Close", "Volume"],
+        progress_bar=True,
+    )
+
+    np.testing.assert_allclose(
+        transformed_with_progress.filter(like="chronos_").to_numpy(dtype=np.float32),
+        transformed.filter(like="chronos_").to_numpy(dtype=np.float32),
+        equal_nan=True,
+    )
+
+
+def test_chronos_embedder_transform_dataframe_progress_bar_batches_windows(
+    fake_chronos,
+    monkeypatch,
+) -> None:
+    df = _make_chronos_dataframe()
+    bars = _install_fake_tqdm(monkeypatch)
+    monkeypatch.setattr(chronos_module, "_DATAFRAME_PROGRESS_BATCH_SIZE", 2)
+
+    embedder = ChronosEmbedder(
+        feature_names=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+    )
+    transformed = embedder.transform_dataframe(
+        df,
+        lookback=3,
+        columns=["Open", "Close", "Volume"],
+        progress_bar=True,
+    )
+
+    embedding_columns = [column for column in transformed.columns if column.startswith("chronos_")]
+    assert len(embedding_columns) == 4
+    assert fake_chronos.last_pipeline is not None
+    assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
+        (2, 3, 2),
+        (1, 3, 2),
+    ]
+    assert len(bars) == 1
+    assert bars[0].total == 3
+    assert bars[0].unit == "window"
+    assert bars[0].desc == "Chronos embeddings"
+    assert bars[0].dynamic_ncols is True
+    assert bars[0].updates == [2, 1]
+    assert bars[0].closed is True
+
+
+def test_chronos_embedder_transform_dataframe_progress_bar_requires_tqdm(
+    fake_chronos,
+    monkeypatch,
+) -> None:
+    df = _make_chronos_dataframe()
+    embedder = ChronosEmbedder(
+        feature_names=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+    )
+
+    def _raise_import_error():
+        raise ImportError("tqdm is not installed")
+
+    original_import = __import__
+
+    def _patched_import(name, *args, **kwargs):
+        if name == "tqdm":
+            _raise_import_error()
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _patched_import)
+    monkeypatch.delitem(sys.modules, "tqdm", raising=False)
+
+    with pytest.raises(ImportError, match="tqdm"):
+        embedder.transform_dataframe(
+            df,
+            lookback=3,
+            columns=["Open", "Close", "Volume"],
+            progress_bar=True,
+        )

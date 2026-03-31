@@ -8,6 +8,7 @@ build/
 dist/
 .pypirc
 *.bat
+.codex
 
 examples/checkpoints/
 examples/models/
