@@ -80,6 +80,36 @@ class _TinyChronosEnv(gym.Env):
         return np.zeros((4, 5), dtype=np.float32), 0.0, True, False, {}
 
 
+class _StrictCpuInputChronosPipeline:
+    def __init__(self) -> None:
+        self.device = torch.device("meta")
+        self.calls: list[torch.Tensor] = []
+
+    def embed(self, context):
+        context_t = torch.as_tensor(context, dtype=torch.float32)
+        if context_t.device.type != "cpu":
+            raise RuntimeError("Chronos embed expected a CPU tensor input.")
+        self.calls.append(context_t.clone())
+
+        if context_t.ndim == 2:
+            context_t = context_t.unsqueeze(0)
+
+        summary = torch.stack(
+            [
+                context_t.mean(dim=(1, 2)),
+                context_t[:, :, 0].mean(dim=1),
+                context_t[:, :, -1].mean(dim=1),
+                context_t[:, -1, :].mean(dim=1),
+            ],
+            dim=-1,
+        )
+        embeddings = [
+            torch.stack([summary[index], summary[index] + 5.0], dim=0)
+            for index in range(summary.shape[0])
+        ]
+        return embeddings, {"dummy": True}
+
+
 def test_base_features_extractor_requires_forward_implementation() -> None:
     class MissingForwardExtractor(BaseFeaturesExtractor):
         pass
@@ -144,6 +174,41 @@ def test_reinforce_aligns_default_chronos_device_map_with_cuda_agent(
     assert agent.device.type == "cuda"
     assert fake_chronos.last_model_name == "amazon/chronos-2"
     assert fake_chronos.last_kwargs == {"device_map": "cuda", "dtype": torch.float32}
+
+
+def test_chronos_extractor_cpu_stages_embed_inputs_for_non_cpu_pipeline_device(
+    monkeypatch,
+) -> None:
+    strict_pipeline = _StrictCpuInputChronosPipeline()
+    monkeypatch.setattr(
+        chronos_module,
+        "_load_pipeline",
+        lambda *args, **kwargs: strict_pipeline,
+    )
+
+    observation_space = gym.spaces.Box(
+        low=-np.inf,
+        high=np.inf,
+        shape=(4, 5),
+        dtype=np.float32,
+    )
+    extractor = ChronosExtractor(
+        observation_space,
+        feature_names=["Open", "High", "Low", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+    )
+
+    assert [call.device.type for call in strict_pipeline.calls] == ["cpu"]
+
+    batch = torch.arange(2 * 4 * 5, dtype=torch.float32).reshape(2, 4, 5)
+    features = extractor(batch)
+
+    assert features.shape == (2, 4)
+    assert [call.device.type for call in strict_pipeline.calls] == ["cpu", "cpu"]
+    assert [tuple(call.shape) for call in strict_pipeline.calls] == [
+        (1, 4, 2),
+        (2, 4, 2),
+    ]
 
 
 def test_chronos_embedder_pooling_last_returns_last_token(fake_chronos) -> None:

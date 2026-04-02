@@ -105,7 +105,7 @@ class BaseAgent(ABC):
         self._stop_training: bool = False
         self._last_obs: Optional[np.ndarray] = None  # maintained between rollouts
         self._episode_returns: np.ndarray = np.zeros(self.n_envs, dtype=np.float32)
-        self._rolling_window: int = 100
+        self._rolling_window: int = 100 # default, can be overridden by EpisodeSolvedCallback
         self._rolling_episode_rewards = deque(maxlen=self._rolling_window)
         self._rolling_mean_episode_reward: float = 0.0
 

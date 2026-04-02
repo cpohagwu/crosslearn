@@ -50,16 +50,6 @@ def _load_pipeline(
         return BaseChronosPipeline.from_pretrained(model_name, **kwargs)
 
 
-def _infer_pipeline_device(pipeline: Any) -> torch.device:
-    for candidate in (
-        getattr(pipeline, "device", None),
-        getattr(getattr(pipeline, "model", None), "device", None),
-    ):
-        if candidate is not None:
-            return torch.device(candidate)
-    return torch.device("cpu")
-
-
 def _as_float_tensor(data: WindowInput) -> torch.Tensor:
     if isinstance(data, torch.Tensor):
         return data.detach().to(dtype=torch.float32)
@@ -353,7 +343,6 @@ class ChronosEmbedder:
         self.dtype = dtype
 
         self.pipeline = _load_pipeline(model_name, device_map=self.device_map, dtype=dtype)
-        self.pipeline_device = _infer_pipeline_device(self.pipeline)
         self.embedding_dim: int | None = None
 
     def _resolve_selection(
@@ -393,8 +382,10 @@ class ChronosEmbedder:
             feature_names=feature_names,
         )
         selected_windows = normalized_windows[..., selected_indices]
-        if selected_windows.device != self.pipeline_device:
-            selected_windows = selected_windows.to(self.pipeline_device)
+        # Chronos stages batches through its own CPU DataLoader/pin-memory path,
+        # so embed() must always receive dense CPU tensors even if the model is on CUDA.
+        if selected_windows.device.type != "cpu":
+            selected_windows = selected_windows.cpu()
 
         with torch.no_grad():
             result = self.pipeline.embed(selected_windows)
@@ -406,7 +397,7 @@ class ChronosEmbedder:
             target_device = (
                 torch.device(output_device)
                 if output_device is not None
-                else self.pipeline_device
+                else self.device_map
             )
             if pooled.device != target_device:
                 pooled = pooled.to(target_device)

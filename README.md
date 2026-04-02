@@ -85,9 +85,13 @@ The Chronos utilities are designed for practical RL use:
 - They accept raw 2D rolling windows or flat backward-compatible inputs.
 - They support feature selection by `selected_columns` or `selected_indices`.
 - They expose `mean` and `last` pooling over Chronos token embeddings.
-- They align with CUDA automatically by default when available, so the online
-  Chronos path does not bounce observations through CPU unless you override
-  `device_map`.
+- They align the Chronos model with CUDA automatically by default when
+  available, while still CPU-staging the input windows immediately before
+  `pipeline.embed(...)` because Chronos' internal batching path expects CPU
+  tensors.
+
+See [docs/chronos.md](docs/chronos.md) for a full explanation of the Chronos
+implementation, data flow, and troubleshooting notes.
 
 ## Quickstart Colab Notebooks
 
@@ -138,6 +142,10 @@ agent = REINFORCE(vec_env, seed=42)
 agent.learn(total_timesteps=100_000)
 ```
 
+See [docs/reinforce.md](docs/reinforce.md) for a full explanation of the native
+REINFORCE implementation, environment handling, policy architecture, logging,
+and verbose training output.
+
 Chronos-backed time-series quickstart:
 
 ```python
@@ -158,11 +166,12 @@ agent = REINFORCE(
 agent.learn(total_timesteps=100_000)
 ```
 
-`ChronosExtractor` follows the agent device automatically by default. That removes the
-largest avoidable CPU/GPU transfer in the online Chronos path, but GPU utilization still
-depends on batch size: use larger `n_envs` than the minimal notebook demos when you want
-wider Chronos inference batches, and only enable async env stepping when environment latency
-is large enough to justify process overhead.
+`ChronosExtractor` resolves `device_map` from the agent device automatically by default, so
+the Chronos model follows the agent device when possible. The current Chronos embed path
+still requires CPU-staged input windows before it batches them onto the model device
+internally, so GPU utilization still depends on batch size: use larger `n_envs` than the
+minimal notebook demos when you want wider Chronos inference batches, and only enable async
+env stepping when environment latency is large enough to justify process overhead.
 
 SB3 interoperability with the same extractor contract:
 
