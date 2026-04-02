@@ -90,8 +90,9 @@ The Chronos utilities are designed for practical RL use:
   `pipeline.embed(...)` because Chronos' internal batching path expects CPU
   tensors.
 
-See [docs/chronos.md](docs/chronos.md) for a full explanation of the Chronos
-implementation, data flow, and troubleshooting notes.
+See [the Chronos implementation guide](https://github.com/cpohagwu/crosslearn/blob/main/docs/chronos.md)
+for a full explanation of the Chronos implementation, data flow, and
+troubleshooting notes.
 
 ## Quickstart Colab Notebooks
 
@@ -142,9 +143,9 @@ agent = REINFORCE(vec_env, seed=42)
 agent.learn(total_timesteps=100_000)
 ```
 
-See [docs/reinforce.md](docs/reinforce.md) for a full explanation of the native
-REINFORCE implementation, environment handling, policy architecture, logging,
-and verbose training output.
+See [the native REINFORCE guide](https://github.com/cpohagwu/crosslearn/blob/main/docs/reinforce.md)
+for a full explanation of the native REINFORCE implementation, environment
+handling, policy architecture, logging, and verbose training output.
 
 Chronos-backed time-series quickstart:
 

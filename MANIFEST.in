@@ -1,6 +1,6 @@
 include LICENSE
 include README.md
-prune docs
+recursive-include docs *.md
 prune examples
 prune tests
 prune crosslearn.egg-info
