@@ -293,7 +293,7 @@ def _make_rolling_windows(values: np.ndarray, lookback: int) -> np.ndarray:
 
 def _make_dataframe_progress_bar(total_windows: int) -> Any:
     try:
-        from tqdm import tqdm
+        from tqdm.auto import tqdm
     except ImportError as exc:
         raise ImportError(
             "Chronos dataframe progress bars require tqdm.\n"
@@ -309,6 +309,12 @@ def _make_dataframe_progress_bar(total_windows: int) -> Any:
         desc="Chronos embeddings",
         dynamic_ncols=True,
     )
+
+
+def _normalize_frame_bound(frame_bound: Sequence[int]) -> tuple[int, int]:
+    if len(frame_bound) != 2:
+        raise ValueError("frame_bound must contain exactly two integers: (start, end).")
+    return int(frame_bound[0]), int(frame_bound[1])
 
 
 class ChronosEmbedder:
@@ -516,6 +522,71 @@ class ChronosEmbedder:
             f"selected_columns={self.selected_columns}, "
             f"selected_indices={self.selected_indices})"
         )
+
+
+def build_offline_bundle(
+    df: Any,
+    *,
+    lookback: int,
+    frame_bound: Sequence[int],
+    feature_columns: Sequence[str],
+    selected_columns: Sequence[str] | None = None,
+    selected_indices: Sequence[int] | None = None,
+    output_prefix: str = "chronos_",
+    progress_bar: bool = False,
+    model_name: str = "amazon/chronos-2",
+    pooling: PoolingMode = "mean",
+    device_map: str = "auto",
+    dtype: torch.dtype = torch.float32,
+) -> dict[str, Any]:
+    """Build an aligned offline Chronos bundle for dataframe-backed environments."""
+    if lookback <= 0:
+        raise ValueError("lookback must be greater than 0.")
+
+    frame_start, frame_end = _normalize_frame_bound(frame_bound)
+    if frame_start < lookback:
+        raise ValueError(
+            f"frame_bound[0] must be at least lookback={lookback}, got {frame_start}."
+        )
+    if frame_start >= frame_end:
+        raise ValueError(
+            f"frame_bound must satisfy frame_bound[0] < frame_bound[1], got {frame_bound}."
+        )
+    if frame_end > len(df):
+        raise ValueError(
+            f"frame_bound[1] must be <= len(df)={len(df)}, got {frame_end}."
+        )
+
+    resolved_feature_columns = [str(column) for column in feature_columns]
+    if not resolved_feature_columns:
+        raise ValueError("feature_columns must contain at least one column name.")
+
+    history = df.iloc[frame_start - lookback : frame_end].reset_index(drop=True).copy()
+    embedder = ChronosEmbedder(
+        model_name=model_name,
+        pooling=pooling,
+        feature_names=resolved_feature_columns,
+        selected_columns=selected_columns,
+        selected_indices=selected_indices,
+        device_map=device_map,
+        dtype=dtype,
+    )
+    transformed = embedder.transform_dataframe(
+        history,
+        lookback=lookback,
+        columns=resolved_feature_columns,
+        output_prefix=output_prefix,
+        progress_bar=progress_bar,
+    )
+    embedding_columns = [
+        column for column in transformed.columns if str(column).startswith(output_prefix)
+    ]
+    trimmed_df = transformed.iloc[lookback - 1 :].reset_index(drop=True)
+    embedding_frame = trimmed_df.loc[:, embedding_columns].copy()
+    return {
+        "df": trimmed_df,
+        "embedding_frame": embedding_frame,
+    }
 
 
 class ChronosExtractor(BaseFeaturesExtractor):
