@@ -83,7 +83,7 @@ See [Chronos implementation guide](https://github.com/cpohagwu/crosslearn/blob/m
 | [Native REINFORCE](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/01_cartpole-lunarlander_reinforce.ipynb) | Policy gradient baseline | CartPole-v1, LunarLander-v3 |
 | [Atari REINFORCE + CNN](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/02_atari_reinforce_cnn.ipynb) | Image observations with NatureCNN | Atari |
 | [Atari SB3 + CNN](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/03_atari_sb3_cnn.ipynb) | PPO with package extractor | Atari |
-| [Chronos-2 + REINFORCE](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) | Time-series encoder (online + o) | Trading (OHLCV) |
+| [Chronos-2 + REINFORCE](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) | Time-series encoder (online + offline) | Trading (OHLCV) |
 | [Chronos-2 + SB3](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/05_gym-anytrading_sb3_chronos2.ipynb) | Time-series encoder (online + offline) | Trading (OHLCV) |
 
 ## Installation
