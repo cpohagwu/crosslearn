@@ -49,62 +49,42 @@ time-series windows a shared feature-extraction interface that works with both n
 
 ## Why CrossLearn
 
-- **Extractor-first design.** The package is organized around reusable extractors that let you plug flat features, image encoders, or foundation-model embeddings into the same RL training interface.
-- **One interface for native and SB3 training.** The same extractor classes can power the
-  package's native `REINFORCE` policy or be passed into SB3 through `policy_kwargs`.
-- **Foundation-model time-series support is first-class.** `ChronosExtractor`,
-  `build_offline_bundle`, and `ChronosEmbedder` cover the main online and offline Chronos flows.
-- **Observation families stay consistent.** Flat vectors, Atari-style image stacks, and
-  multivariate time-series windows all plug into the same feature-extraction contract.
-- **The extension path is clean.** If you can encode an observation batch into feature
-  vectors, you can turn that encoder into a reusable RL backbone.
+- **Extractor-first.** Representation learning is decoupled from agent algorithms. Build and reuse feature encoders across native REINFORCE and SB3.
+- **Observation-agnostic interface.** Dense vectors, image stacks, and time-series windows inherit from `BaseFeaturesExtractor`, working with any SB3-compatible policy.
+- **Chronos support.** Chronos-2 time-series encoder integrated for both online and offline workflows via `ChronosExtractor` and `build_offline_bundle`.
+- **Minimal surface.** Agents remain lightweight; complexity lives in the extractor layer where it can be tested and reused independently.
 
 ## Representation Families
 
-| Observation family | Main components | Typical observation shape | Why it matters |
+| Observation family | Components | Typical shape | Extractor |
 | --- | --- | --- | --- |
-| Flat vectors | `FlattenExtractor` | `(n_features,)` | Keeps classic control and tabular-style numeric tasks simple and fast. |
-| Images | `AtariPreprocessor` + `NatureCNNExtractor` | `(C, H, W)` | Gives Atari-style grayscale, resized, stacked frames with a standard CNN backbone. |
-| Rolling time series | `ChronosExtractor` or `build_offline_bundle` | `(lookback, n_features)` or flat legacy windows | Lets a pretrained time-series foundation model serve as the observation encoder. |
+| Flat vectors | Dense features | `(n_features,)` | `FlattenExtractor` |
+| Images | Atari-style frames | `(C, H, W)` | `AtariPreprocessor` + `NatureCNNExtractor` |
+| Time series | Rolling windows | `(lookback, n_features)` | `ChronosExtractor` or `build_offline_bundle` |
 
-All packaged extractors implement the SB3 `BaseFeaturesExtractor` contract, which is the key
-reason the same backbone can move between native `crosslearn.REINFORCE` and SB3 policies.
+All extractors implement SB3's `BaseFeaturesExtractor` interface, enabling reuse across native REINFORCE and Stable-Baselines3 policies.
 
 ## Chronos Workflows
 
-**CrossLearn** includes two main Chronos paths plus a lower-level utility:
+Three APIs for Chronos-2 time-series encoding:
 
-- `ChronosExtractor` embeds rolling windows online inside the policy forward pass.
-- `build_offline_bundle` slices a dataframe, appends aligned Chronos columns, trims the warmup rows, and returns the bundle you hand to an offline environment.
-- `ChronosEmbedder` remains available when you need direct control over windows or dataframe augmentation.
+- `ChronosExtractor` - Online embedding within policy forward pass.
+- `build_offline_bundle` - Dataframe slicing and pre-embedding for offline training.
+- `ChronosEmbedder` - Low-level embedding control for custom pipelines.
 
-These Chronos APIs use the Chronos-2 multivariate forecasting model, which gives you a powerful pretrained time-series encoder without needing to train your own sequence model from scratch.
+Features: configurable pooling (`mean` / `last`), feature selection, and automatic CUDA alignment with CPU-staged input.
 
-The Chronos utilities are designed for practical RL use:
-
-- They accept raw 2D rolling windows or flat backward-compatible inputs.
-- They support feature selection by `selected_columns` or `selected_indices`.
-- They expose `mean` and `last` pooling over Chronos token embeddings.
-- They align the Chronos model with CUDA automatically by default when
-  available, while still CPU-staging the input windows immediately before
-  `pipeline.embed(...)` because Chronos' internal batching path expects CPU
-  tensors.
-
-See [the Chronos implementation guide](https://github.com/cpohagwu/crosslearn/blob/main/docs/chronos.md)
-for a full explanation of the Chronos implementation, data flow, and
-troubleshooting notes.
+See [Chronos implementation guide](https://github.com/cpohagwu/crosslearn/blob/main/docs/chronos.md) for details.
 
 ## Quickstart Colab Notebooks
 
-Checkout the Colab quickstarts for runnable examples of native and SB3 training with vector, image, and time-series observations:
-
-| Notebook | Focus | Colab |
+| Notebook | Task | Environment |
 | --- | --- | --- |
-| Native REINFORCE quickstart | Shortest path from `make_vec_env` to a working policy-gradient baseline on `CartPole-v1` or `LunarLander-v3`. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/01_cartpole-lunarlander_reinforce.ipynb) |
-| Atari REINFORCE with Nature CNN | Native Atari training with `AtariPreprocessor` and `NatureCNNExtractor`. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/02_atari_reinforce_cnn.ipynb) |
-| Atari PPO with the package CNN extractor | SB3 `PPO` using the same image backbone interface. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/03_atari_sb3_cnn.ipynb) |
-| Chronos-2 trading features with native REINFORCE | Online and offline Chronos workflows over rolling OHLCV windows. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) |
-| Chronos-2 trading features with SB3 PPO | The same Chronos representation path plugged into SB3. | [Open in Colab](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/05_gym-anytrading_sb3_chronos2.ipynb) |
+| [Native REINFORCE](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/01_cartpole-lunarlander_reinforce.ipynb) | Policy gradient baseline | CartPole-v1, LunarLander-v3 |
+| [Atari REINFORCE + CNN](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/02_atari_reinforce_cnn.ipynb) | Image observations with NatureCNN | Atari |
+| [Atari SB3 + CNN](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/03_atari_sb3_cnn.ipynb) | PPO with package extractor | Atari |
+| [Chronos-2 + REINFORCE](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) | Time-series encoder (online + o) | Trading (OHLCV) |
+| [Chronos-2 + SB3](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/05_gym-anytrading_sb3_chronos2.ipynb) | Time-series encoder (online + offline) | Trading (OHLCV) |
 
 ## Installation
 

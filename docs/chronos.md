@@ -131,11 +131,11 @@ This is specific to the Chronos integration. It does not mean the entire agent o
 
 This design separation is intentional. CrossLearn keeps three concerns independent:
 
-1. **Observation-shape normalization** — flattening, reshaping, and feature selection happen before embeddings
-2. **Chronos model placement via `device_map`** — controls where the model lives independently
-3. **Caller-visible output placement via `output_device`** — ensures outputs land where the rest of the policy expects them
+1. **Observation-shape normalization** - flattening, reshaping, and feature selection happen before embeddings
+2. **Chronos model placement via `device_map`** - controls where the model lives independently
+3. **Caller-visible output placement via `output_device`** - ensures outputs land where the rest of the policy expects them
 
-This separation is what allows CrossLearn to respect Chronos' CPU input requirement for `pipeline.embed(...)` without changing the surrounding RL code. The Chronos model can still live on GPU, the input gets staged to CPU just for the embed call, and the output returns to GPU for the rest of the policy—all without requiring Chronos-specific workarounds in your training loop.
+This separation is what allows CrossLearn to respect Chronos' CPU input requirement for `pipeline.embed(...)` without changing the surrounding RL code. The Chronos model can still live on GPU, the input gets staged to CPU just for the embed call, and the output returns to GPU for the rest of the policy-all without requiring Chronos-specific workarounds in your training loop.
 
 ## Online Path: `ChronosExtractor`
 
