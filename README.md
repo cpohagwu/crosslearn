@@ -26,7 +26,7 @@ time-series windows a shared feature-extraction interface that works with both n
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-D22128?style=for-the-badge&logo=apache&logoColor=white)](https://github.com/cpohagwu/crosslearn/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/crosslearn?style=for-the-badge&logo=pypi&logoColor=white&label=PyPI&color=3775A9)](https://pypi.org/project/crosslearn/)
-[![Downloads](https://img.shields.io/pypi/dm/crosslearn?style=for-the-badge&logo=pypi&logoColor=white&label=Downloads&color=3775A9)](https://pypistats.org/packages/crosslearn)
+[![Downloads](https://img.shields.io/pypi/dm/crosslearn?style=for-the-badge&color=3775A9&label=Downloads)](https://pypi.org/project/crosslearn/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](#installation)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.2%2B-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](#installation)
 [![Gymnasium](https://img.shields.io/badge/Gymnasium-0.29%2B-1f6feb?style=for-the-badge)](https://gymnasium.farama.org/)
@@ -52,8 +52,8 @@ time-series windows a shared feature-extraction interface that works with both n
 - **Extractor-first design.** The package is organized around reusable extractors that let you plug flat features, image encoders, or foundation-model embeddings into the same RL training interface.
 - **One interface for native and SB3 training.** The same extractor classes can power the
   package's native `REINFORCE` policy or be passed into SB3 through `policy_kwargs`.
-- **Foundation-model time-series support is first-class.** `ChronosExtractor` and
-  `ChronosEmbedder` let pretrained Chronos models act as RL backbones for rolling windows.
+- **Foundation-model time-series support is first-class.** `ChronosExtractor`,
+  `build_offline_bundle`, and `ChronosEmbedder` cover the main online and offline Chronos flows.
 - **Observation families stay consistent.** Flat vectors, Atari-style image stacks, and
   multivariate time-series windows all plug into the same feature-extraction contract.
 - **The extension path is clean.** If you can encode an observation batch into feature
@@ -65,20 +65,20 @@ time-series windows a shared feature-extraction interface that works with both n
 | --- | --- | --- | --- |
 | Flat vectors | `FlattenExtractor` | `(n_features,)` | Keeps classic control and tabular-style numeric tasks simple and fast. |
 | Images | `AtariPreprocessor` + `NatureCNNExtractor` | `(C, H, W)` | Gives Atari-style grayscale, resized, stacked frames with a standard CNN backbone. |
-| Rolling time series | `ChronosExtractor` or `ChronosEmbedder` | `(lookback, n_features)` or flat legacy windows | Lets a pretrained time-series foundation model serve as the observation encoder. |
+| Rolling time series | `ChronosExtractor` or `build_offline_bundle` | `(lookback, n_features)` or flat legacy windows | Lets a pretrained time-series foundation model serve as the observation encoder. |
 
 All packaged extractors implement the SB3 `BaseFeaturesExtractor` contract, which is the key
 reason the same backbone can move between native `crosslearn.REINFORCE` and SB3 policies.
 
 ## Chronos Workflows
 
-**CrossLearn** includes two complementary Chronos paths:
+**CrossLearn** includes two main Chronos paths plus a lower-level utility:
 
 - `ChronosExtractor` embeds rolling windows online inside the policy forward pass.
-- `ChronosEmbedder` embeds windows offline and writes aligned embedding columns back into a
-  dataframe.
+- `build_offline_bundle` slices a dataframe, appends aligned Chronos columns, trims the warmup rows, and returns the bundle you hand to an offline environment.
+- `ChronosEmbedder` remains available when you need direct control over windows or dataframe augmentation.
 
-They both use the Chronos-2 multivariate forecasting model, which gives you a powerful pretrained time-series encoder without needing to train your own sequence model from scratch.
+These Chronos APIs use the Chronos-2 multivariate forecasting model, which gives you a powerful pretrained time-series encoder without needing to train your own sequence model from scratch.
 
 The Chronos utilities are designed for practical RL use:
 
@@ -121,18 +121,6 @@ Weights & Biases. Notebook-only example dependencies are kept separate.
 
 ## Core API
 
-```python
-from crosslearn import REINFORCE, make_vec_env
-from crosslearn.envs import AtariPreprocessor
-from crosslearn.extractors import (
-    BaseFeaturesExtractor,
-    ChronosEmbedder,
-    ChronosExtractor,
-    FlattenExtractor,
-    NatureCNNExtractor,
-)
-```
-
 Minimal native quickstart:
 
 ```python
@@ -147,13 +135,42 @@ See [the native REINFORCE guide](https://github.com/cpohagwu/crosslearn/blob/mai
 for a full explanation of the native REINFORCE implementation, environment
 handling, policy architecture, logging, and verbose training output.
 
-Chronos-backed time-series quickstart:
+Chronos-backed online trading quickstart:
 
 ```python
+import numpy as np
+from gym_anytrading.datasets import STOCKS_GOOGL
+from gym_anytrading.envs import StocksEnv
+
 from crosslearn import REINFORCE, make_vec_env
 from crosslearn.extractors import ChronosExtractor
 
-vec_env = make_vec_env(lambda: MyTradingEnv(window_size=30), n_envs=4)
+LOOKBACK = 30
+FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+SELECTED_COLUMNS = ["Close", "Volume"]
+FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
+
+
+def online_process_data(env):
+    start = env.frame_bound[0] - env.window_size
+    end = env.frame_bound[1]
+    prices = env.df.loc[:, "Close"].to_numpy()[start:end]
+    signal_features = env.df.loc[:, FEATURE_COLUMNS].to_numpy(dtype=np.float32)[start:end]
+    return prices, signal_features
+
+
+class OnlineStocksEnv(StocksEnv):
+    _process_data = online_process_data
+
+
+vec_env = make_vec_env(
+    lambda: OnlineStocksEnv(
+        df=STOCKS_GOOGL,
+        window_size=LOOKBACK,
+        frame_bound=FRAME_BOUND,
+    ),
+    n_envs=4,
+)
 
 agent = REINFORCE(
     vec_env,
@@ -167,31 +184,53 @@ agent = REINFORCE(
 agent.learn(total_timesteps=100_000)
 ```
 
-`ChronosExtractor` resolves `device_map` from the agent device automatically by default, so
-the Chronos model follows the agent device when possible. The current Chronos embed path
-still requires CPU-staged input windows before it batches them onto the model device
-internally, so GPU utilization still depends on batch size: use larger `n_envs` than the
-minimal notebook demos when you want wider Chronos inference batches, and only enable async
-env stepping when environment latency is large enough to justify process overhead.
-
-SB3 interoperability with the same extractor contract:
+Chronos-backed offline trading quickstart:
 
 ```python
-import gymnasium as gym
-from stable_baselines3 import PPO
+import numpy as np
+from gym_anytrading.datasets import STOCKS_GOOGL
+from gym_anytrading.envs import StocksEnv
 
-from crosslearn.envs import AtariPreprocessor
-from crosslearn.extractors import NatureCNNExtractor
+from crosslearn import REINFORCE, make_vec_env
+from crosslearn.extractors import build_offline_bundle
 
-env = gym.make("ALE/Breakout-v5", render_mode="rgb_array", frameskip=1)
-env = AtariPreprocessor(env, stack_size=4, frame_skip=1, screen_size=84)
+LOOKBACK = 30
+FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+SELECTED_COLUMNS = ["Close", "Volume"]
+FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
 
-model = PPO(
-    "CnnPolicy",
-    env,
-    policy_kwargs={"features_extractor_class": NatureCNNExtractor},
-    verbose=1,
+offline_bundle = build_offline_bundle(
+    STOCKS_GOOGL,
+    lookback=LOOKBACK,
+    frame_bound=FRAME_BOUND,
+    feature_columns=FEATURE_COLUMNS,
+    selected_columns=SELECTED_COLUMNS,
+    progress_bar=True,
 )
+
+
+class OfflineStocksEnv(StocksEnv):
+    def __init__(self, prices, signal_features, **kwargs):
+        self._prices = prices
+        self._signal_features = signal_features.astype(np.float32)
+        super().__init__(**kwargs)
+
+    def _process_data(self):
+        return self._prices, self._signal_features
+
+
+def make_offline_env():
+    return OfflineStocksEnv(
+        prices=offline_bundle["df"]["Close"].to_numpy(dtype=np.float32),
+        signal_features=offline_bundle["embedding_frame"].to_numpy(dtype=np.float32),
+        df=offline_bundle["df"],
+        window_size=1,
+        frame_bound=(1, len(offline_bundle["df"])),
+    )
+
+
+offline_agent = REINFORCE(make_vec_env(make_offline_env, n_envs=1), seed=42)
+offline_agent.learn(total_timesteps=100_000)
 ```
 
 ## Also Included

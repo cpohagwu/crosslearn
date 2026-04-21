@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from collections.abc import Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -9,9 +10,14 @@ import pytest
 import torch
 
 from crosslearn import REINFORCE
+from crosslearn.extractors import build_offline_bundle as exported_build_offline_bundle
 import crosslearn.extractors.chronos as chronos_module
 from crosslearn.extractors.base import BaseFeaturesExtractor
-from crosslearn.extractors.chronos import ChronosEmbedder, ChronosExtractor
+from crosslearn.extractors.chronos import (
+    ChronosEmbedder,
+    ChronosExtractor,
+    build_offline_bundle,
+)
 
 
 def _make_chronos_dataframe():
@@ -44,6 +50,7 @@ def _install_fake_tqdm(monkeypatch):
             self.closed = True
 
     module = types.ModuleType("tqdm")
+    auto_module = types.ModuleType("tqdm.auto")
 
     def _tqdm(*, total, unit, desc, dynamic_ncols):
         bar = _FakeTqdm(
@@ -56,7 +63,10 @@ def _install_fake_tqdm(monkeypatch):
         return bar
 
     module.tqdm = _tqdm
+    module.auto = auto_module
+    auto_module.tqdm = _tqdm
     monkeypatch.setitem(sys.modules, "tqdm", module)
+    monkeypatch.setitem(sys.modules, "tqdm.auto", auto_module)
     return instances
 
 
@@ -158,6 +168,15 @@ def test_reinforce_aligns_default_chronos_device_map_with_cuda_agent(
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.nn.Module, "to", lambda self, *args, **kwargs: self)
+    original_tensor_to = torch.Tensor.to
+
+    def _tensor_to(self, *args, **kwargs):
+        target = args[0] if args else kwargs.get("device")
+        if target is not None and torch.device(target).type == "cuda":
+            return self
+        return original_tensor_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", _tensor_to, raising=False)
 
     agent = REINFORCE(
         lambda: _TinyChronosEnv(),
@@ -320,6 +339,65 @@ def test_chronos_embedder_transform_dataframe_requires_pandas(
         embedder.transform_dataframe(object(), lookback=3)
 
 
+def test_build_offline_bundle_is_exported_from_extractors(fake_chronos) -> None:
+    assert exported_build_offline_bundle is build_offline_bundle
+
+
+def test_build_offline_bundle_returns_trimmed_dataframe_and_embedding_frame(
+    fake_chronos,
+) -> None:
+    df = _make_chronos_dataframe()
+    bundle = build_offline_bundle(
+        df,
+        lookback=3,
+        frame_bound=(3, len(df)),
+        feature_columns=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+    )
+
+    assert set(bundle) == {"df", "embedding_frame"}
+    assert list(bundle["embedding_frame"].columns) == [
+        "chronos_0",
+        "chronos_1",
+        "chronos_2",
+        "chronos_3",
+    ]
+    assert len(bundle["df"]) == 3
+    assert len(bundle["embedding_frame"]) == 3
+    np.testing.assert_allclose(
+        bundle["embedding_frame"].to_numpy(dtype=np.float32),
+        bundle["df"].filter(like="chronos_").to_numpy(dtype=np.float32),
+    )
+    assert fake_chronos.last_pipeline is not None
+    assert fake_chronos.last_pipeline.calls[-1].shape == (3, 3, 2)
+
+
+@pytest.mark.parametrize(
+    ("lookback", "frame_bound", "match"),
+    [
+        (0, (0, 5), "lookback must be greater than 0"),
+        (3, (2, 5), r"frame_bound\[0\] must be at least lookback=3"),
+        (3, (3, 3), r"frame_bound must satisfy frame_bound\[0\] < frame_bound\[1\]"),
+        (3, (3, 6), r"frame_bound\[1\] must be <= len\(df\)=5"),
+    ],
+)
+def test_build_offline_bundle_validates_frame_bounds(
+    fake_chronos,
+    lookback: int,
+    frame_bound: Sequence[int],
+    match: str,
+) -> None:
+    df = _make_chronos_dataframe()
+
+    with pytest.raises(ValueError, match=match):
+        build_offline_bundle(
+            df,
+            lookback=lookback,
+            frame_bound=frame_bound,
+            feature_columns=["Open", "Close", "Volume"],
+        )
+
+
 def test_chronos_embedder_dataframe_alignment_matches_extractor(
     fake_chronos,
 ) -> None:
@@ -449,12 +527,13 @@ def test_chronos_embedder_transform_dataframe_progress_bar_requires_tqdm(
     original_import = __import__
 
     def _patched_import(name, *args, **kwargs):
-        if name == "tqdm":
+        if name in {"tqdm", "tqdm.auto"}:
             _raise_import_error()
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr("builtins.__import__", _patched_import)
     monkeypatch.delitem(sys.modules, "tqdm", raising=False)
+    monkeypatch.delitem(sys.modules, "tqdm.auto", raising=False)
 
     with pytest.raises(ImportError, match="tqdm"):
         embedder.transform_dataframe(

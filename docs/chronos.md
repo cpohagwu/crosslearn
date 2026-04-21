@@ -2,23 +2,40 @@
 
 This document explains how Chronos is integrated into CrossLearn, both as a user-facing feature and as an implementation detail.
 
-CrossLearn exposes two Chronos-backed components:
+CrossLearn exposes three Chronos-backed APIs:
 
 - `ChronosExtractor` for online embedding inside a policy forward pass
-- `ChronosEmbedder` for offline embedding of rolling windows and dataframe augmentation
+- `build_offline_bundle` for the high-level offline dataframe-to-environment workflow
+- `ChronosEmbedder` for direct window embedding and lower-level dataframe augmentation
 
-Both are built around Chronos-2 as a reusable time-series representation model, not as an implementation of ChronosRL.
+All three are built around Chronos-2 as a reusable time-series representation model, not as an implementation of ChronosRL.
 
 ## Overview
 
 The Chronos integration is designed around one idea: the reinforcement-learning policy should see a standard feature vector, while Chronos handles the time-series encoding behind the scenes.
 
 - `ChronosExtractor` is the online path. It receives batched observations, converts them into rolling windows if needed, runs Chronos embeddings, pools the token-level outputs, and returns one feature vector per observation.
-- `ChronosEmbedder` is the offline path. It takes windows directly or derives them from a dataframe, embeds them in batches, and can append aligned embedding columns back into the dataframe.
+- `build_offline_bundle` is the high-level offline path. It slices the requested dataframe history, runs Chronos embedding over rolling windows, trims the alignment warmup rows, and returns both the aligned dataframe and the embedding-only dataframe you hand to an offline environment.
+- `ChronosEmbedder` is the lower-level utility underneath both paths. It takes windows directly or derives them from a dataframe, embeds them in batches, and can append aligned embedding columns back into the dataframe.
 
-The two paths share the same normalization, feature-selection, pooling, and Chronos loading logic.
+The three APIs share the same normalization, feature-selection, pooling, and Chronos loading logic.
 
 ## Components
+
+### `build_offline_bundle`
+
+`build_offline_bundle` is the main offline convenience API.
+
+It is responsible for:
+
+- validating `lookback` and `frame_bound`
+- slicing the exact dataframe history needed for the requested window range
+- creating an internal `ChronosEmbedder`
+- appending aligned Chronos embedding columns
+- trimming the first `lookback - 1` warmup rows
+- returning a dict with `df` and `embedding_frame`
+
+Use `build_offline_bundle` when you want a ready-to-wire offline bundle for dataframe-backed environments such as `gym-anytrading`.
 
 ### `ChronosEmbedder`
 
@@ -32,7 +49,7 @@ The two paths share the same normalization, feature-selection, pooling, and Chro
 - pooling token embeddings into one vector per window
 - returning either `numpy.float32` arrays or torch tensors
 
-Use `ChronosEmbedder` when you want direct control over embedding windows or when you want to build offline features for a dataframe.
+Use `ChronosEmbedder` when you want direct control over embedding windows or when you want to augment a dataframe directly without the extra slicing and trimming contract of `build_offline_bundle`.
 
 ### `ChronosExtractor`
 
@@ -94,13 +111,13 @@ This pooled vector becomes the feature vector exposed to the policy or returned 
 
 `device_map` controls where the Chronos model is loaded, not the device of the tensor passed by the caller into `pipeline.embed(...)`.
 
-In CrossLearn:
+In CrossLearn, `ChronosExtractor` resolves `device_map` automatically from the agent device by default, so the model follows the agent device when possible. For the native agent path specifically:
 
 - `device_map="auto"` is resolved to the best available torch device
-- for the native agent path, the agent forwards its resolved device into the Chronos extractor kwargs when the extractor supports `device_map`
+- the agent forwards its resolved device into the Chronos extractor kwargs when the extractor supports `device_map`
 - the Chronos pipeline is loaded using that resolved `device_map`
 
-That means a CUDA-enabled agent will still load the Chronos model on CUDA by default.
+This means a CUDA-enabled agent will load the Chronos model on CUDA by default. However, GPU utilization still depends on batch size because of the CPU-staging requirement described below. To maximize Chronos throughput on GPU, use larger `n_envs` in your vectorized environment to create wider inference batches. Only enable async environment stepping if the environment latency is large enough to justify the process overhead.
 
 ### Why the Chronos input is still CPU-staged
 
@@ -111,6 +128,14 @@ Chronos' `pipeline.embed(...)` implementation batches inputs through an internal
 Because of that, CrossLearn always stages the input window tensor onto CPU immediately before calling `pipeline.embed(...)`.
 
 This is specific to the Chronos integration. It does not mean the entire agent or extractor path has to remain on CPU.
+
+This design separation is intentional. CrossLearn keeps three concerns independent:
+
+1. **Observation-shape normalization** — flattening, reshaping, and feature selection happen before embeddings
+2. **Chronos model placement via `device_map`** — controls where the model lives independently
+3. **Caller-visible output placement via `output_device`** — ensures outputs land where the rest of the policy expects them
+
+This separation is what allows CrossLearn to respect Chronos' CPU input requirement for `pipeline.embed(...)` without changing the surrounding RL code. The Chronos model can still live on GPU, the input gets staged to CPU just for the embed call, and the output returns to GPU for the rest of the policy—all without requiring Chronos-specific workarounds in your training loop.
 
 ## Online Path: `ChronosExtractor`
 
@@ -137,17 +162,29 @@ Important consequence:
 
 That means Chronos integration errors can appear at extractor construction time, before the first training step.
 
-## Offline Path: `ChronosEmbedder`
+## Offline Path: `build_offline_bundle` and `ChronosEmbedder`
 
-`ChronosEmbedder` can also be used without an RL agent.
+The preferred offline entry point is `build_offline_bundle(...)`.
 
 Typical offline use cases:
 
-- embed one or more windows directly
-- precompute Chronos features for training data
-- append aligned embedding columns to a dataframe
+- precompute Chronos features for dataframe-backed environments
+- build an aligned feature dataframe for offline training
+- embed one or more windows directly when you need lower-level control
 
-When using `transform_dataframe(...)`:
+When using `build_offline_bundle(...)`:
+
+1. CrossLearn validates `lookback` and `frame_bound`.
+2. It slices `df.iloc[frame_bound[0] - lookback : frame_bound[1]]`.
+3. It runs `ChronosEmbedder.transform_dataframe(...)` on that history slice.
+4. It trims the first `lookback - 1` rows so the returned dataframe starts where the environment starts.
+5. It returns:
+   - `df`: the trimmed dataframe with aligned `chronos_*` columns
+   - `embedding_frame`: the trimmed dataframe containing only the embedding columns
+
+`ChronosEmbedder.transform_dataframe(...)` is the lower-level path.
+
+When using `transform_dataframe(...)` directly:
 
 1. CrossLearn resolves which columns to embed.
 2. It creates rolling windows from the dataframe values.
@@ -155,17 +192,46 @@ When using `transform_dataframe(...)`:
 4. It appends the resulting Chronos embedding columns back to a copy of the dataframe.
 5. The first `lookback - 1` rows are filled with `NaN` so the embeddings stay aligned with the original index.
 
-If `progress_bar=True`, batching is still used, but CrossLearn also displays a `tqdm` progress bar.
+If `progress_bar=True`, CrossLearn displays a `tqdm` progress bar with estimated time remaining for the embedding process. This is useful for large dataframes (and long lookback periods) where embedding can take a while.
 
 ## Practical Examples
 
 ### Online REINFORCE with Chronos
 
 ```python
+import numpy as np
+from gym_anytrading.datasets import STOCKS_GOOGL
+from gym_anytrading.envs import StocksEnv
+
 from crosslearn import REINFORCE, make_vec_env
 from crosslearn.extractors import ChronosExtractor
 
-vec_env = make_vec_env(lambda: MyTradingEnv(window_size=30), n_envs=4)
+LOOKBACK = 30
+FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+SELECTED_COLUMNS = ["Close", "Volume"]
+FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
+
+
+def online_process_data(env):
+    start = env.frame_bound[0] - env.window_size
+    end = env.frame_bound[1]
+    prices = env.df.loc[:, "Close"].to_numpy()[start:end]
+    signal_features = env.df.loc[:, FEATURE_COLUMNS].to_numpy(dtype=np.float32)[start:end]
+    return prices, signal_features
+
+
+class OnlineStocksEnv(StocksEnv):
+    _process_data = online_process_data
+
+
+vec_env = make_vec_env(
+    lambda: OnlineStocksEnv(
+        df=STOCKS_GOOGL,
+        window_size=LOOKBACK,
+        frame_bound=FRAME_BOUND,
+    ),
+    n_envs=4,
+)
 
 agent = REINFORCE(
     vec_env,
@@ -179,7 +245,50 @@ agent = REINFORCE(
 agent.learn(total_timesteps=100_000)
 ```
 
-### Offline dataframe augmentation
+### Offline trading bundle
+
+```python
+import numpy as np
+from gym_anytrading.datasets import STOCKS_GOOGL
+from gym_anytrading.envs import StocksEnv
+
+from crosslearn.extractors import build_offline_bundle
+
+LOOKBACK = 30
+FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+SELECTED_COLUMNS = ["Close", "Volume"]
+FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
+
+offline_bundle = build_offline_bundle(
+    STOCKS_GOOGL,
+    lookback=LOOKBACK,
+    frame_bound=FRAME_BOUND,
+    feature_columns=FEATURE_COLUMNS,
+    selected_columns=SELECTED_COLUMNS,
+    progress_bar=True,
+)
+
+
+class OfflineStocksEnv(StocksEnv):
+    def __init__(self, prices, signal_features, **kwargs):
+        self._prices = prices
+        self._signal_features = signal_features.astype(np.float32)
+        super().__init__(**kwargs)
+
+    def _process_data(self):
+        return self._prices, self._signal_features
+
+
+offline_env = OfflineStocksEnv(
+    prices=offline_bundle["df"]["Close"].to_numpy(dtype=np.float32),
+    signal_features=offline_bundle["embedding_frame"].to_numpy(dtype=np.float32),
+    df=offline_bundle["df"],
+    window_size=1,
+    frame_bound=(1, len(offline_bundle["df"])),
+)
+```
+
+### Lower-level dataframe augmentation
 
 ```python
 from crosslearn.extractors import ChronosEmbedder
@@ -193,7 +302,6 @@ transformed = embedder.transform_dataframe(
     df,
     lookback=30,
     columns=["Open", "Close", "Volume"],
-    output_prefix="chronos_",
     progress_bar=True,
 )
 ```
@@ -208,24 +316,10 @@ Install the Chronos extras:
 pip install "crosslearn[chronos]"
 ```
 
-### `RuntimeError: cannot pin 'torch.cuda.FloatTensor' only dense CPU tensors can be pinned`
-
-This happens when a CUDA tensor reaches `pipeline.embed(...)`. In CrossLearn, the fix is to CPU-stage the window tensor before the Chronos embed call while keeping the model placement controlled by `device_map`.
-
 ### `selected_columns requires feature_names`
 
 When selecting by name, provide the full ordered list of feature names for the input window so CrossLearn can resolve names into indices.
 
 ### `lookback is required`
 
-Flat legacy inputs do not encode their time dimension explicitly. Provide `lookback` so CrossLearn can reconstruct `(lookback, n_features)`.
-
-## Design Notes
-
-The Chronos integration tries to keep three concerns separate:
-
-- observation-shape normalization
-- Chronos model placement via `device_map`
-- caller-visible output placement via `output_device`
-
-That separation is what allows CrossLearn to respect Chronos' CPU input requirement without changing the surrounding RL code or introducing a Chronos-specific public API knob for the workaround.
+Flat legacy inputs do not encode their time dimension explicitly. Provide `lookback` (at **most** the value of `frame_bound[0]`) so CrossLearn can reconstruct `(lookback, n_features)`.
