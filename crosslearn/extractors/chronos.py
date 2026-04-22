@@ -524,7 +524,7 @@ class ChronosEmbedder:
         )
 
 
-def build_offline_bundle(
+def prepare_offline_dataframe(
     df: Any,
     *,
     lookback: int,
@@ -538,8 +538,8 @@ def build_offline_bundle(
     pooling: PoolingMode = "mean",
     device_map: str = "auto",
     dtype: torch.dtype = torch.float32,
-) -> dict[str, Any]:
-    """Build an aligned offline Chronos bundle for dataframe-backed environments."""
+) -> Any:
+    """Build a trimmed offline Chronos dataframe for dataframe-backed environments."""
     if lookback <= 0:
         raise ValueError("lookback must be greater than 0.")
 
@@ -578,15 +578,7 @@ def build_offline_bundle(
         output_prefix=output_prefix,
         progress_bar=progress_bar,
     )
-    embedding_columns = [
-        column for column in transformed.columns if str(column).startswith(output_prefix)
-    ]
-    trimmed_df = transformed.iloc[lookback - 1 :].reset_index(drop=True)
-    embedding_frame = trimmed_df.loc[:, embedding_columns].copy()
-    return {
-        "df": trimmed_df,
-        "embedding_frame": embedding_frame,
-    }
+    return transformed.iloc[lookback - 1 :].reset_index(drop=True)
 
 
 class ChronosExtractor(BaseFeaturesExtractor):

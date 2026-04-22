@@ -4,7 +4,7 @@ from crosslearn.extractors.cnn import NatureCNNExtractor
 from crosslearn.extractors.chronos import (
     ChronosEmbedder,
     ChronosExtractor,
-    build_offline_bundle,
+    prepare_offline_dataframe,
 )
 
 __all__ = [
@@ -13,5 +13,5 @@ __all__ = [
     "NatureCNNExtractor",
     "ChronosEmbedder",
     "ChronosExtractor",
-    "build_offline_bundle",
+    "prepare_offline_dataframe",
 ]

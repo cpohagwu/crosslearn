@@ -10,13 +10,15 @@ import pytest
 import torch
 
 from crosslearn import REINFORCE
-from crosslearn.extractors import build_offline_bundle as exported_build_offline_bundle
+from crosslearn.extractors import (
+    prepare_offline_dataframe as exported_prepare_offline_dataframe,
+)
 import crosslearn.extractors.chronos as chronos_module
 from crosslearn.extractors.base import BaseFeaturesExtractor
 from crosslearn.extractors.chronos import (
     ChronosEmbedder,
     ChronosExtractor,
-    build_offline_bundle,
+    prepare_offline_dataframe,
 )
 
 
@@ -339,15 +341,15 @@ def test_chronos_embedder_transform_dataframe_requires_pandas(
         embedder.transform_dataframe(object(), lookback=3)
 
 
-def test_build_offline_bundle_is_exported_from_extractors(fake_chronos) -> None:
-    assert exported_build_offline_bundle is build_offline_bundle
+def test_prepare_offline_dataframe_is_exported_from_extractors(fake_chronos) -> None:
+    assert exported_prepare_offline_dataframe is prepare_offline_dataframe
 
 
-def test_build_offline_bundle_returns_trimmed_dataframe_and_embedding_frame(
+def test_prepare_offline_dataframe_returns_trimmed_dataframe(
     fake_chronos,
 ) -> None:
     df = _make_chronos_dataframe()
-    bundle = build_offline_bundle(
+    offline_df = prepare_offline_dataframe(
         df,
         lookback=3,
         frame_bound=(3, len(df)),
@@ -355,18 +357,17 @@ def test_build_offline_bundle_returns_trimmed_dataframe_and_embedding_frame(
         selected_columns=["Close", "Volume"],
     )
 
-    assert set(bundle) == {"df", "embedding_frame"}
-    assert list(bundle["embedding_frame"].columns) == [
+    embedding_columns = [
         "chronos_0",
         "chronos_1",
         "chronos_2",
         "chronos_3",
     ]
-    assert len(bundle["df"]) == 3
-    assert len(bundle["embedding_frame"]) == 3
+    assert list(offline_df.filter(like="chronos_").columns) == embedding_columns
+    assert len(offline_df) == 3
     np.testing.assert_allclose(
-        bundle["embedding_frame"].to_numpy(dtype=np.float32),
-        bundle["df"].filter(like="chronos_").to_numpy(dtype=np.float32),
+        offline_df.filter(like="chronos_").to_numpy(dtype=np.float32),
+        offline_df.loc[:, embedding_columns].to_numpy(dtype=np.float32),
     )
     assert fake_chronos.last_pipeline is not None
     assert fake_chronos.last_pipeline.calls[-1].shape == (3, 3, 2)
@@ -381,7 +382,7 @@ def test_build_offline_bundle_returns_trimmed_dataframe_and_embedding_frame(
         (3, (3, 6), r"frame_bound\[1\] must be <= len\(df\)=5"),
     ],
 )
-def test_build_offline_bundle_validates_frame_bounds(
+def test_prepare_offline_dataframe_validates_frame_bounds(
     fake_chronos,
     lookback: int,
     frame_bound: Sequence[int],
@@ -390,7 +391,7 @@ def test_build_offline_bundle_validates_frame_bounds(
     df = _make_chronos_dataframe()
 
     with pytest.raises(ValueError, match=match):
-        build_offline_bundle(
+        prepare_offline_dataframe(
             df,
             lookback=lookback,
             frame_bound=frame_bound,

@@ -51,7 +51,7 @@ time-series windows a shared feature-extraction interface that works with both n
 
 - **Extractor-first.** Representation learning is decoupled from agent algorithms. Build and reuse feature encoders across native REINFORCE and SB3.
 - **Observation-agnostic interface.** Dense vectors, image stacks, and time-series windows inherit from `BaseFeaturesExtractor`, working with any SB3-compatible policy.
-- **Chronos support.** Chronos-2 time-series encoder integrated for both online and offline workflows via `ChronosExtractor` and `build_offline_bundle`.
+- **Chronos support.** Chronos-2 time-series encoder integrated for both online and offline workflows via `ChronosExtractor` and `prepare_offline_dataframe`.
 - **Minimal surface.** Agents remain lightweight; complexity lives in the extractor layer where it can be tested and reused independently.
 
 ## Representation Families
@@ -60,7 +60,7 @@ time-series windows a shared feature-extraction interface that works with both n
 | --- | --- | --- | --- |
 | Flat vectors | Dense features | `(n_features,)` | `FlattenExtractor` |
 | Images | Atari-style frames | `(C, H, W)` | `AtariPreprocessor` + `NatureCNNExtractor` |
-| Time series | Rolling windows | `(lookback, n_features)` | `ChronosExtractor` or `build_offline_bundle` |
+| Time series | Rolling windows | `(lookback, n_features)` | `ChronosExtractor` or `prepare_offline_dataframe` |
 
 All extractors implement SB3's `BaseFeaturesExtractor` interface, enabling reuse across native REINFORCE and Stable-Baselines3 policies.
 
@@ -69,7 +69,7 @@ All extractors implement SB3's `BaseFeaturesExtractor` interface, enabling reuse
 Three APIs for Chronos-2 time-series encoding:
 
 - `ChronosExtractor` - Online embedding within policy forward pass.
-- `build_offline_bundle` - Dataframe slicing and pre-embedding for offline training.
+- `prepare_offline_dataframe` - Dataframe slicing and pre-embedding for offline training.
 - `ChronosEmbedder` - Low-level embedding control for custom pipelines.
 
 Features: configurable pooling (`mean` / `last`), feature selection, and automatic CUDA alignment with CPU-staged input.
@@ -172,14 +172,14 @@ from gym_anytrading.datasets import STOCKS_GOOGL
 from gym_anytrading.envs import StocksEnv
 
 from crosslearn import REINFORCE, make_vec_env
-from crosslearn.extractors import build_offline_bundle
+from crosslearn.extractors import prepare_offline_dataframe
 
 LOOKBACK = 30
 FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 SELECTED_COLUMNS = ["Close", "Volume"]
 FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
 
-offline_bundle = build_offline_bundle(
+offline_df = prepare_offline_dataframe(
     STOCKS_GOOGL,
     lookback=LOOKBACK,
     frame_bound=FRAME_BOUND,
@@ -201,11 +201,11 @@ class OfflineStocksEnv(StocksEnv):
 
 def make_offline_env():
     return OfflineStocksEnv(
-        prices=offline_bundle["df"]["Close"].to_numpy(dtype=np.float32),
-        signal_features=offline_bundle["embedding_frame"].to_numpy(dtype=np.float32),
-        df=offline_bundle["df"],
+        prices=offline_df["Close"].to_numpy(dtype=np.float32),
+        signal_features=offline_df.filter(like="chronos_").to_numpy(dtype=np.float32),
+        df=offline_df,
         window_size=1,
-        frame_bound=(1, len(offline_bundle["df"])),
+        frame_bound=(1, len(offline_df)),
     )
 
 

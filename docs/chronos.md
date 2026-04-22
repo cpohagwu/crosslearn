@@ -5,7 +5,7 @@ This document explains how Chronos is integrated into CrossLearn, both as a user
 CrossLearn exposes three Chronos-backed APIs:
 
 - `ChronosExtractor` for online embedding inside a policy forward pass
-- `build_offline_bundle` for the high-level offline dataframe-to-environment workflow
+- `prepare_offline_dataframe` for the high-level offline dataframe-to-environment workflow
 - `ChronosEmbedder` for direct window embedding and lower-level dataframe augmentation
 
 All three are built around Chronos-2 as a reusable time-series representation model, not as an implementation of ChronosRL.
@@ -15,16 +15,16 @@ All three are built around Chronos-2 as a reusable time-series representation mo
 The Chronos integration is designed around one idea: the reinforcement-learning policy should see a standard feature vector, while Chronos handles the time-series encoding behind the scenes.
 
 - `ChronosExtractor` is the online path. It receives batched observations, converts them into rolling windows if needed, runs Chronos embeddings, pools the token-level outputs, and returns one feature vector per observation.
-- `build_offline_bundle` is the high-level offline path. It slices the requested dataframe history, runs Chronos embedding over rolling windows, trims the alignment warmup rows, and returns both the aligned dataframe and the embedding-only dataframe you hand to an offline environment.
+- `prepare_offline_dataframe` is the high-level offline path. It slices the requested dataframe history, runs Chronos embedding over rolling windows, trims the alignment warmup rows, and returns the aligned dataframe you hand to an offline environment.
 - `ChronosEmbedder` is the lower-level utility underneath both paths. It takes windows directly or derives them from a dataframe, embeds them in batches, and can append aligned embedding columns back into the dataframe.
 
 The three APIs share the same normalization, feature-selection, pooling, and Chronos loading logic.
 
 ## Components
 
-### `build_offline_bundle`
+### `prepare_offline_dataframe`
 
-`build_offline_bundle` is the main offline convenience API.
+`prepare_offline_dataframe` is the main offline convenience API.
 
 It is responsible for:
 
@@ -33,9 +33,9 @@ It is responsible for:
 - creating an internal `ChronosEmbedder`
 - appending aligned Chronos embedding columns
 - trimming the first `lookback - 1` warmup rows
-- returning a dict with `df` and `embedding_frame`
+- returning the trimmed dataframe with both the original columns and aligned `chronos_*` columns
 
-Use `build_offline_bundle` when you want a ready-to-wire offline bundle for dataframe-backed environments such as `gym-anytrading`.
+Use `prepare_offline_dataframe` when you want a ready-to-wire offline dataframe for dataframe-backed environments such as `gym-anytrading`.
 
 ### `ChronosEmbedder`
 
@@ -49,7 +49,7 @@ Use `build_offline_bundle` when you want a ready-to-wire offline bundle for data
 - pooling token embeddings into one vector per window
 - returning either `numpy.float32` arrays or torch tensors
 
-Use `ChronosEmbedder` when you want direct control over embedding windows or when you want to augment a dataframe directly without the extra slicing and trimming contract of `build_offline_bundle`.
+Use `ChronosEmbedder` when you want direct control over embedding windows or when you want to augment a dataframe directly without the extra slicing and trimming contract of `prepare_offline_dataframe`.
 
 ### `ChronosExtractor`
 
@@ -162,9 +162,9 @@ Important consequence:
 
 That means Chronos integration errors can appear at extractor construction time, before the first training step.
 
-## Offline Path: `build_offline_bundle` and `ChronosEmbedder`
+## Offline Path: `prepare_offline_dataframe` and `ChronosEmbedder`
 
-The preferred offline entry point is `build_offline_bundle(...)`.
+The preferred offline entry point is `prepare_offline_dataframe(...)`.
 
 Typical offline use cases:
 
@@ -172,15 +172,13 @@ Typical offline use cases:
 - build an aligned feature dataframe for offline training
 - embed one or more windows directly when you need lower-level control
 
-When using `build_offline_bundle(...)`:
+When using `prepare_offline_dataframe(...)`:
 
 1. CrossLearn validates `lookback` and `frame_bound`.
 2. It slices `df.iloc[frame_bound[0] - lookback : frame_bound[1]]`.
 3. It runs `ChronosEmbedder.transform_dataframe(...)` on that history slice.
 4. It trims the first `lookback - 1` rows so the returned dataframe starts where the environment starts.
-5. It returns:
-   - `df`: the trimmed dataframe with aligned `chronos_*` columns
-   - `embedding_frame`: the trimmed dataframe containing only the embedding columns
+5. It returns the trimmed dataframe with aligned `chronos_*` columns.
 
 `ChronosEmbedder.transform_dataframe(...)` is the lower-level path.
 
@@ -245,21 +243,21 @@ agent = REINFORCE(
 agent.learn(total_timesteps=100_000)
 ```
 
-### Offline trading bundle
+### Offline trading dataframe
 
 ```python
 import numpy as np
 from gym_anytrading.datasets import STOCKS_GOOGL
 from gym_anytrading.envs import StocksEnv
 
-from crosslearn.extractors import build_offline_bundle
+from crosslearn.extractors import prepare_offline_dataframe
 
 LOOKBACK = 30
 FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 SELECTED_COLUMNS = ["Close", "Volume"]
 FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
 
-offline_bundle = build_offline_bundle(
+offline_df = prepare_offline_dataframe(
     STOCKS_GOOGL,
     lookback=LOOKBACK,
     frame_bound=FRAME_BOUND,
@@ -280,11 +278,11 @@ class OfflineStocksEnv(StocksEnv):
 
 
 offline_env = OfflineStocksEnv(
-    prices=offline_bundle["df"]["Close"].to_numpy(dtype=np.float32),
-    signal_features=offline_bundle["embedding_frame"].to_numpy(dtype=np.float32),
-    df=offline_bundle["df"],
+    prices=offline_df["Close"].to_numpy(dtype=np.float32),
+    signal_features=offline_df.filter(like="chronos_").to_numpy(dtype=np.float32),
+    df=offline_df,
     window_size=1,
-    frame_bound=(1, len(offline_bundle["df"])),
+    frame_bound=(1, len(offline_df)),
 )
 ```
 
