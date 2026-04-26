@@ -6,14 +6,17 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 import numpy as np
+import torch
+
+from crosslearn._devices import resolve_device
 
 
 @dataclass
 class _PCAFitState:
-    mean: np.ndarray
-    scale: np.ndarray
-    components: np.ndarray
-    explained_variance_ratio: np.ndarray
+    mean: torch.Tensor
+    scale: torch.Tensor
+    components: torch.Tensor
+    explained_variance_ratio: torch.Tensor
 
 
 def _make_dataframe_progress_bar(total_rows: int) -> Any:
@@ -34,78 +37,131 @@ def _make_dataframe_progress_bar(total_rows: int) -> Any:
     )
 
 
-def _as_2d_float_array(values: Any) -> np.ndarray:
-    array = np.asarray(values, dtype=np.float32)
-    if array.ndim != 2:
+def _as_2d_float_tensor(
+    values: Any,
+    *,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    if isinstance(values, torch.Tensor):
+        tensor = values.detach()
+    else:
+        tensor = torch.as_tensor(np.asarray(values, dtype=np.float32))
+
+    if tensor.ndim != 2:
         raise ValueError("Expected a 2D array of shape (n_rows, n_features).")
-    if array.shape[1] == 0:
+    if tensor.shape[1] == 0:
         raise ValueError("Expected at least one feature column.")
-    return array
+    return tensor.to(device=device, dtype=dtype)
+
+
+def _to_numpy_float32(values: torch.Tensor) -> np.ndarray:
+    return values.detach().to(device="cpu", dtype=torch.float32).numpy()
 
 
 def _select_n_components(
-    explained_variance_ratio: np.ndarray,
+    explained_variance_ratio: torch.Tensor | np.ndarray,
     explained_variance_threshold: float,
 ) -> int:
-    cumulative = np.cumsum(explained_variance_ratio, dtype=np.float64)
-    selected = int(
-        np.searchsorted(cumulative, explained_variance_threshold, side="left") + 1
-    )
+    if isinstance(explained_variance_ratio, torch.Tensor):
+        cumulative = torch.cumsum(
+            explained_variance_ratio.to(dtype=torch.float64),
+            dim=0,
+        )
+        threshold = torch.tensor(
+            explained_variance_threshold,
+            dtype=cumulative.dtype,
+            device=cumulative.device,
+        )
+        selected = int(
+            torch.searchsorted(cumulative, threshold, right=False).item() + 1
+        )
+    else:
+        cumulative = np.cumsum(explained_variance_ratio, dtype=np.float64)
+        selected = int(
+            np.searchsorted(cumulative, explained_variance_threshold, side="left") + 1
+        )
     return min(selected, int(explained_variance_ratio.shape[0]))
 
 
 def _fit_pca(
-    history: np.ndarray,
+    history: torch.Tensor | np.ndarray,
     *,
     standardize: bool,
     n_components: int | None = None,
-    reference_components: np.ndarray | None = None,
+    reference_components: torch.Tensor | np.ndarray | None = None,
 ) -> _PCAFitState:
-    history_f64 = history.astype(np.float64, copy=False)
-    mean = history_f64.mean(axis=0)
+    if not isinstance(history, torch.Tensor):
+        history = _as_2d_float_tensor(
+            history,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+    history_f64 = history.to(dtype=torch.float64)
+    mean = history_f64.mean(dim=0)
     transformed_history = history_f64 - mean
 
     if standardize:
-        raw_scale = history_f64.std(axis=0, ddof=0)
-        scale = np.where(raw_scale > 0.0, raw_scale, 1.0)
+        raw_scale = torch.std(history_f64, dim=0, unbiased=False)
+        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
         transformed_history = transformed_history / scale
     else:
-        scale = np.ones(history.shape[1], dtype=np.float64)
+        scale = torch.ones(history.shape[1], dtype=torch.float64, device=history.device)
 
-    _, singular_values, vt = np.linalg.svd(transformed_history, full_matrices=False)
+    _, singular_values, vt = torch.linalg.svd(transformed_history, full_matrices=False)
     variance_denom = max(int(history.shape[0]) - 1, 1)
     explained_variance = (singular_values**2) / variance_denom
-    total_variance = float(explained_variance.sum())
+    total_variance = float(explained_variance.sum().item())
     if total_variance > 0.0:
         explained_variance_ratio = explained_variance / total_variance
     else:
-        explained_variance_ratio = np.zeros_like(explained_variance)
+        explained_variance_ratio = torch.zeros_like(explained_variance)
 
     if n_components is None:
         n_components = int(vt.shape[0])
-    components = vt[:n_components].copy()
+    components = vt[:n_components].clone()
 
     if reference_components is not None:
+        if not isinstance(reference_components, torch.Tensor):
+            reference_components = torch.as_tensor(
+                reference_components,
+                device=components.device,
+                dtype=components.dtype,
+            )
+        else:
+            reference_components = reference_components.to(
+                device=components.device,
+                dtype=components.dtype,
+            )
         limit = min(int(reference_components.shape[0]), int(components.shape[0]))
         for index in range(limit):
-            if float(np.dot(components[index], reference_components[index])) < 0.0:
+            if (
+                float(
+                    torch.dot(components[index], reference_components[index]).item()
+                )
+                < 0.0
+            ):
                 components[index] *= -1.0
 
     return _PCAFitState(
-        mean=mean.astype(np.float32),
-        scale=scale.astype(np.float32),
-        components=components.astype(np.float32),
-        explained_variance_ratio=explained_variance_ratio.astype(np.float32),
+        mean=mean,
+        scale=scale,
+        components=components,
+        explained_variance_ratio=explained_variance_ratio,
     )
 
 
-def _project_rows(values: np.ndarray, state: _PCAFitState) -> np.ndarray:
-    values_f64 = values.astype(np.float64, copy=False)
-    transformed = (values_f64 - state.mean.astype(np.float64)) / state.scale.astype(
-        np.float64
+def _project_rows(values: torch.Tensor | np.ndarray, state: _PCAFitState) -> torch.Tensor:
+    values_f32 = _as_2d_float_tensor(
+        values,
+        device=state.mean.device,
+        dtype=torch.float32,
     )
-    projected = transformed @ state.components.T.astype(np.float64)
-    return projected.astype(np.float32)
+    values_f64 = values_f32.to(dtype=torch.float64)
+    transformed = (values_f64 - state.mean) / state.scale
+    projected = transformed @ state.components.T
+    return projected.to(dtype=torch.float32)
 
 
 class WalkForwardPCATransformer:
@@ -128,12 +184,15 @@ class WalkForwardPCATransformer:
         standardize: If ``True``, center and divide by the walk-forward
             standard deviation before PCA. If ``False``, PCA is still centered
             but not variance-scaled.
+        device: Torch device for PCA math. ``"auto"`` prefers CUDA when
+            available.
 
     Example::
 
         transformer = WalkForwardPCATransformer(
             warmup=500,
             explained_variance_threshold=0.99,
+            device="auto",
         )
         projected = transformer.fit_transform(values)
         projected.shape  # (len(values) - 500, transformer.n_components_)
@@ -145,6 +204,7 @@ class WalkForwardPCATransformer:
         warmup: int,
         explained_variance_threshold: float = 0.99,
         standardize: bool = True,
+        device: str | torch.device = "auto",
     ) -> None:
         if warmup < 2:
             raise ValueError("warmup must be at least 2 for PCA.")
@@ -156,6 +216,7 @@ class WalkForwardPCATransformer:
         self.warmup = int(warmup)
         self.explained_variance_threshold = float(explained_variance_threshold)
         self.standardize = bool(standardize)
+        self.device = resolve_device(device)
 
         self.n_features_in_: int | None = None
         self.n_components_: int | None = None
@@ -163,6 +224,12 @@ class WalkForwardPCATransformer:
         self.scale_: np.ndarray | None = None
         self.components_: np.ndarray | None = None
         self.initial_explained_variance_ratio_: np.ndarray | None = None
+        self._fit_state: _PCAFitState | None = None
+
+    def _update_public_state(self, state: _PCAFitState) -> None:
+        self.mean_ = _to_numpy_float32(state.mean)
+        self.scale_ = _to_numpy_float32(state.scale)
+        self.components_ = _to_numpy_float32(state.components)
 
     def fit(self, values: Any) -> "WalkForwardPCATransformer":
         """Fit the initial warmup PCA state and choose a fixed output width.
@@ -181,7 +248,11 @@ class WalkForwardPCATransformer:
             ValueError: If fewer than ``warmup`` rows are provided or if the
                 input is not a non-empty 2D matrix.
         """
-        array = _as_2d_float_array(values)
+        array = _as_2d_float_tensor(
+            values,
+            device=self.device,
+            dtype=torch.float32,
+        )
         if array.shape[0] < self.warmup:
             raise ValueError(
                 f"Need at least warmup={self.warmup} rows, got {array.shape[0]}."
@@ -195,11 +266,15 @@ class WalkForwardPCATransformer:
 
         self.n_features_in_ = int(array.shape[1])
         self.n_components_ = selected_components
-        self.mean_ = initial_state.mean
-        self.scale_ = initial_state.scale
-        self.components_ = initial_state.components[:selected_components].copy()
-        self.initial_explained_variance_ratio_ = (
-            initial_state.explained_variance_ratio.copy()
+        self._fit_state = _PCAFitState(
+            mean=initial_state.mean.clone(),
+            scale=initial_state.scale.clone(),
+            components=initial_state.components[:selected_components].clone(),
+            explained_variance_ratio=initial_state.explained_variance_ratio.clone(),
+        )
+        self._update_public_state(self._fit_state)
+        self.initial_explained_variance_ratio_ = _to_numpy_float32(
+            initial_state.explained_variance_ratio
         )
         return self
 
@@ -220,24 +295,20 @@ class WalkForwardPCATransformer:
             ValueError: If the transformer has not been fit or if the feature
                 count does not match the fitted state.
         """
-        if self.components_ is None or self.mean_ is None or self.scale_ is None:
+        if self._fit_state is None or self.components_ is None or self.mean_ is None or self.scale_ is None:
             raise ValueError("WalkForwardPCATransformer must be fit before transform().")
 
-        array = _as_2d_float_array(values)
+        array = _as_2d_float_tensor(
+            values,
+            device=self.device,
+            dtype=torch.float32,
+        )
         if int(array.shape[1]) != int(self.n_features_in_):
             raise ValueError(
                 f"Expected {self.n_features_in_} input features, got {array.shape[1]}."
             )
 
-        return _project_rows(
-            array,
-            _PCAFitState(
-                mean=self.mean_,
-                scale=self.scale_,
-                components=self.components_,
-                explained_variance_ratio=np.empty(0, dtype=np.float32),
-            ),
-        )
+        return _to_numpy_float32(_project_rows(array, self._fit_state))
 
     def fit_transform(self, values: Any) -> np.ndarray:
         """Fit on the warmup window and run the full walk-forward projection.
@@ -280,22 +351,19 @@ class WalkForwardPCATransformer:
             ValueError: If the input is not a valid 2D matrix or contains fewer
                 than ``warmup`` rows.
         """
-        array = _as_2d_float_array(values)
+        array = _as_2d_float_tensor(
+            values,
+            device=self.device,
+            dtype=torch.float32,
+        )
         self.fit(array)
 
         assert self.n_components_ is not None
-        assert self.components_ is not None
-        assert self.mean_ is not None
-        assert self.scale_ is not None
+        assert self._fit_state is not None
 
-        projected_rows: list[np.ndarray] = []
-        reference_components = self.components_.copy()
-        latest_state = _PCAFitState(
-            mean=self.mean_,
-            scale=self.scale_,
-            components=self.components_.copy(),
-            explained_variance_ratio=np.empty(0, dtype=np.float32),
-        )
+        projected_rows: list[torch.Tensor] = []
+        reference_components = self._fit_state.components.clone()
+        latest_state = self._fit_state
 
         total_rows = max(int(array.shape[0]) - self.warmup, 0)
         progress = _make_dataframe_progress_bar(total_rows) if progress_bar else None
@@ -310,7 +378,7 @@ class WalkForwardPCATransformer:
                 projected_rows.append(
                     _project_rows(array[end_index : end_index + 1], fit_state)[0]
                 )
-                reference_components = fit_state.components.copy()
+                reference_components = fit_state.components.clone()
                 latest_state = fit_state
                 if progress is not None:
                     progress.update(1)
@@ -318,13 +386,12 @@ class WalkForwardPCATransformer:
             if progress is not None:
                 progress.close()
 
-        self.mean_ = latest_state.mean
-        self.scale_ = latest_state.scale
-        self.components_ = latest_state.components
+        self._fit_state = latest_state
+        self._update_public_state(latest_state)
 
         if not projected_rows:
             return np.empty((0, self.n_components_), dtype=np.float32)
-        return np.stack(projected_rows, axis=0).astype(np.float32, copy=False)
+        return _to_numpy_float32(torch.stack(projected_rows, dim=0))
 
 
 def walkforward_pca_dataframe(
@@ -334,6 +401,7 @@ def walkforward_pca_dataframe(
     warmup: int,
     explained_variance_threshold: float = 0.99,
     standardize: bool = True,
+    device: str | torch.device = "auto",
     output_prefix: str = "pca_",
     drop_feature_columns: bool = False,
     trim_warmup: bool = False,
@@ -358,6 +426,8 @@ def walkforward_pca_dataframe(
             threshold used to choose ``n_components_``.
         standardize: If ``True``, recompute mean/std walk-forward before each
             PCA fit. If ``False``, only walk-forward centering is applied.
+        device: Torch device for PCA math. ``"auto"`` prefers CUDA when
+            available.
         output_prefix: Prefix for appended PCA columns.
         drop_feature_columns: If ``True``, drop the original
             ``feature_columns`` after adding the PCA columns.
@@ -391,6 +461,7 @@ def walkforward_pca_dataframe(
             feature_columns=chronos_columns,
             warmup=500,
             explained_variance_threshold=0.99,
+            device="auto",
             trim_warmup=True,
         )
     """
@@ -419,6 +490,7 @@ def walkforward_pca_dataframe(
         warmup=warmup,
         explained_variance_threshold=explained_variance_threshold,
         standardize=standardize,
+        device=device,
     )
     projected = transformer.walkforward_transform(values, progress_bar=progress_bar)
 

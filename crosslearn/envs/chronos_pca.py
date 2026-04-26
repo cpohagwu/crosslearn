@@ -6,8 +6,15 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from crosslearn._devices import resolve_device
 from crosslearn.extractors.chronos import ChronosEmbedder
-from crosslearn.extractors.pca import _PCAFitState, _fit_pca, _project_rows, _select_n_components
+from crosslearn.extractors.pca import (
+    _PCAFitState,
+    _fit_pca,
+    _project_rows,
+    _select_n_components,
+    _to_numpy_float32,
+)
 
 
 class WalkForwardChronosPCAWrapper(
@@ -70,7 +77,7 @@ class WalkForwardChronosPCAWrapper(
             current online wrapper does not display a progress bar.
         model_name: Chronos model identifier. Default: ``"amazon/chronos-2"``.
         pooling: Token pooling mode forwarded to ``ChronosEmbedder``.
-        device_map: Target device for the Chronos model.
+        device_map: Target device for both Chronos and PCA math.
         dtype: Torch dtype used when loading Chronos.
 
     Example::
@@ -81,6 +88,7 @@ class WalkForwardChronosPCAWrapper(
             warmup=500,
             feature_columns=["open", "high", "low", "close", "volume"],
             frame_bound=(532, len(df)),
+            device_map="auto",
         )
         obs, info = env.reset()
         obs.shape  # (n_components,)
@@ -200,6 +208,7 @@ class WalkForwardChronosPCAWrapper(
         self.standardize = bool(standardize)
         self.explained_variance_threshold = float(explained_variance_threshold)
         self.progress_bar = bool(progress_bar)
+        self.pca_device = resolve_device(device_map)
 
         self.embedder = ChronosEmbedder(
             model_name=model_name,
@@ -226,9 +235,10 @@ class WalkForwardChronosPCAWrapper(
             lookback=self.lookback,
             n_features=len(self.feature_columns),
             feature_names=self.feature_columns,
-            as_tensor=False,
+            as_tensor=True,
+            output_device=self.pca_device,
         )
-        self._warmup_embeddings = np.asarray(warmup_embeddings, dtype=np.float32)
+        self._warmup_embeddings = warmup_embeddings.detach().to(dtype=torch.float32)
 
         initial_state = _fit_pca(
             self._warmup_embeddings,
@@ -241,10 +251,10 @@ class WalkForwardChronosPCAWrapper(
         self._initial_fit_state = _PCAFitState(
             mean=initial_state.mean,
             scale=initial_state.scale,
-            components=initial_state.components[: self.n_components].copy(),
-            explained_variance_ratio=initial_state.explained_variance_ratio.copy(),
+            components=initial_state.components[: self.n_components].clone(),
+            explained_variance_ratio=initial_state.explained_variance_ratio.clone(),
         )
-        self._initial_reference_components = self._initial_fit_state.components.copy()
+        self._initial_reference_components = self._initial_fit_state.components.clone()
 
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
@@ -253,9 +263,9 @@ class WalkForwardChronosPCAWrapper(
             dtype=np.float32,
         )
 
-        self._history_embeddings: list[np.ndarray] = []
-        self._current_embedding: np.ndarray | None = None
-        self._reference_components: np.ndarray | None = None
+        self._history_embeddings: list[torch.Tensor] = []
+        self._current_embedding: torch.Tensor | None = None
+        self._reference_components: torch.Tensor | None = None
 
     def _build_window(self, end_index: int) -> np.ndarray:
         """Return one historical raw window ending at ``end_index``.
@@ -276,7 +286,7 @@ class WalkForwardChronosPCAWrapper(
             self.feature_columns
         ].to_numpy(dtype=np.float32, copy=True)
 
-    def _embed_single_observation(self, observation: np.ndarray) -> np.ndarray:
+    def _embed_single_observation(self, observation: np.ndarray) -> torch.Tensor:
         """Embed one wrapped-env observation into a single Chronos vector.
 
         Args:
@@ -284,16 +294,17 @@ class WalkForwardChronosPCAWrapper(
                 timestep.
 
         Returns:
-            A ``float32`` embedding vector of shape ``(embedding_dim,)``.
+            A ``float32`` embedding tensor of shape ``(embedding_dim,)``.
         """
         embedded = self.embedder.embed_windows(
             observation,
             lookback=self.lookback,
             n_features=len(self.feature_columns),
             feature_names=self.feature_columns,
-            as_tensor=False,
+            as_tensor=True,
+            output_device=self.pca_device,
         )
-        return np.asarray(embedded[0], dtype=np.float32)
+        return embedded[0].detach().to(dtype=torch.float32)
 
     def _project_current_embedding(self, fit_state: _PCAFitState) -> np.ndarray:
         """Project the current Chronos embedding with a supplied PCA state.
@@ -307,7 +318,9 @@ class WalkForwardChronosPCAWrapper(
         """
         if self._current_embedding is None:
             raise RuntimeError("No current embedding is available to project.")
-        return _project_rows(self._current_embedding.reshape(1, -1), fit_state)[0]
+        return _to_numpy_float32(
+            _project_rows(self._current_embedding.reshape(1, -1), fit_state)[0]
+        )
 
     def reset(self, *, seed: int | None = None, options=None):
         """Reset the wrapped env and emit the first projected PCA observation.
@@ -326,8 +339,8 @@ class WalkForwardChronosPCAWrapper(
             wrapped env's reset info dict.
         """
         observation, info = self.env.reset(seed=seed, options=options)
-        self._history_embeddings = [row.copy() for row in self._warmup_embeddings]
-        self._reference_components = self._initial_reference_components.copy()
+        self._history_embeddings = [row.clone() for row in self._warmup_embeddings]
+        self._reference_components = self._initial_reference_components.clone()
         self._current_embedding = self._embed_single_observation(observation)
         projected = self._project_current_embedding(self._initial_fit_state)
         return projected, info
@@ -355,14 +368,14 @@ class WalkForwardChronosPCAWrapper(
                 "WalkForwardChronosPCAWrapper.step() called before reset()."
             )
 
-        self._history_embeddings.append(self._current_embedding.copy())
+        self._history_embeddings.append(self._current_embedding.clone())
         fit_state = _fit_pca(
-            np.stack(self._history_embeddings, axis=0),
+            torch.stack(self._history_embeddings, dim=0),
             standardize=self.standardize,
             n_components=self.n_components,
             reference_components=self._reference_components,
         )
-        self._reference_components = fit_state.components.copy()
+        self._reference_components = fit_state.components.clone()
         self._current_embedding = self._embed_single_observation(observation)
         projected = self._project_current_embedding(fit_state)
         return projected, reward, terminated, truncated, info

@@ -6,6 +6,7 @@ import types
 import gymnasium as gym
 import numpy as np
 import pytest
+import torch
 
 import crosslearn.extractors.pca as pca_module
 from crosslearn.envs import WalkForwardChronosPCAWrapper
@@ -14,6 +15,7 @@ from crosslearn.extractors import (
     embed_dataframe,
     walkforward_pca_dataframe,
 )
+from crosslearn.extractors.chronos import ChronosEmbedder
 
 
 def _install_fake_tqdm(monkeypatch):
@@ -159,6 +161,7 @@ def test_walkforward_pca_transformer_matches_manual_first_projection() -> None:
         warmup=3,
         explained_variance_threshold=0.95,
         standardize=True,
+        device="cpu",
     )
 
     projected = transformer.walkforward_transform(values)
@@ -188,6 +191,7 @@ def test_walkforward_pca_transformer_center_only_matches_manual_first_projection
         warmup=3,
         explained_variance_threshold=0.9,
         standardize=False,
+        device="cpu",
     )
 
     projected = transformer.walkforward_transform(values)
@@ -210,6 +214,7 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        device="cpu",
         output_prefix="pca_",
         drop_feature_columns=False,
         trim_warmup=False,
@@ -219,6 +224,7 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        device="cpu",
         output_prefix="pca_",
         drop_feature_columns=True,
         trim_warmup=True,
@@ -243,12 +249,14 @@ def test_walkforward_pca_dataframe_progress_bar_matches_default(
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        device="cpu",
     )
     with_progress = walkforward_pca_dataframe(
         df,
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        device="cpu",
         progress_bar=True,
     )
 
@@ -268,6 +276,7 @@ def test_walkforward_pca_dataframe_progress_bar_tracks_rows(monkeypatch) -> None
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        device="cpu",
         progress_bar=True,
     )
 
@@ -306,6 +315,7 @@ def test_walkforward_pca_dataframe_progress_bar_requires_tqdm(
             feature_columns=["Open", "Close", "Volume"],
             warmup=3,
             standardize=True,
+            device="cpu",
             progress_bar=True,
         )
 
@@ -313,18 +323,18 @@ def test_walkforward_pca_dataframe_progress_bar_requires_tqdm(
 def test_walkforward_pca_sign_alignment_stabilizes_component_orientation(
     monkeypatch,
 ) -> None:
-    original_svd = pca_module.np.linalg.svd
+    original_svd = pca_module.torch.linalg.svd
     call_count = {"value": 0}
 
     def _patched_svd(*args, **kwargs):
         u, singular_values, vt = original_svd(*args, **kwargs)
         if call_count["value"] % 2 == 1:
-            vt = vt.copy()
+            vt = vt.clone()
             vt[0] *= -1.0
         call_count["value"] += 1
         return u, singular_values, vt
 
-    monkeypatch.setattr(pca_module.np.linalg, "svd", _patched_svd)
+    monkeypatch.setattr(pca_module.torch.linalg, "svd", _patched_svd)
 
     values = np.array(
         [
@@ -341,6 +351,7 @@ def test_walkforward_pca_sign_alignment_stabilizes_component_orientation(
         warmup=3,
         explained_variance_threshold=0.9,
         standardize=False,
+        device="cpu",
     )
 
     projected = transformer.walkforward_transform(values)
@@ -351,6 +362,21 @@ def test_walkforward_pca_sign_alignment_stabilizes_component_orientation(
         np.sign(projected[:, 0]),
         np.full(projected.shape[0], orientation, dtype=np.float32),
     )
+
+
+def test_walkforward_pca_transformer_auto_resolves_to_cpu_when_cuda_unavailable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.9,
+        standardize=True,
+        device="auto",
+    )
+
+    assert transformer.device.type == "cpu"
 
 
 def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
@@ -376,6 +402,7 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         warmup=warmup,
         explained_variance_threshold=0.99,
         standardize=True,
+        device="cpu",
         output_prefix="pca_",
         drop_feature_columns=True,
         trim_warmup=True,
@@ -394,6 +421,7 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         warmup=warmup,
         feature_columns=feature_columns,
         selected_columns=["Close", "Volume"],
+        device_map="cpu",
     )
 
     observations = []
@@ -444,6 +472,7 @@ def test_walkforward_chronos_pca_wrapper_validates_boundary_requirements(
             warmup=3,
             feature_columns=["Open", "Close", "Volume"],
             selected_columns=["Close", "Volume"],
+            device_map="cpu",
         )
 
 
@@ -465,6 +494,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_exact_minimum_dataset(
         warmup=warmup,
         feature_columns=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
+        device_map="cpu",
     )
 
     obs, _ = wrapped.reset()
@@ -496,6 +526,7 @@ def test_walkforward_chronos_pca_wrapper_embeds_only_one_new_window_per_step(
         warmup=warmup,
         feature_columns=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
+        device_map="cpu",
     )
 
     assert fake_chronos.last_pipeline is not None
@@ -517,3 +548,134 @@ def test_walkforward_chronos_pca_wrapper_embeds_only_one_new_window_per_step(
         (1, lookback, 2),
         (1, lookback, 2),
     ]
+
+
+def test_walkforward_chronos_pca_wrapper_requests_tensor_embeddings_on_cpu(
+    fake_chronos,
+    monkeypatch,
+) -> None:
+    recorded: list[tuple[bool | None, torch.device | str | None]] = []
+    original_embed_windows = ChronosEmbedder.embed_windows
+
+    def _patched_embed_windows(self, *args, **kwargs):
+        recorded.append((kwargs.get("as_tensor"), kwargs.get("output_device")))
+        return original_embed_windows(self, *args, **kwargs)
+
+    monkeypatch.setattr(ChronosEmbedder, "embed_windows", _patched_embed_windows)
+
+    df = _make_pca_dataframe()
+    lookback = 3
+    warmup = 3
+    env = _SequentialWindowEnv(
+        df=df,
+        feature_columns=["Open", "Close", "Volume"],
+        window_size=lookback,
+        frame_bound=(lookback + warmup, len(df)),
+    )
+    wrapped = WalkForwardChronosPCAWrapper(
+        env,
+        lookback=lookback,
+        warmup=warmup,
+        feature_columns=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+        device_map="cpu",
+    )
+
+    wrapped.reset()
+
+    assert recorded[0][0] is True
+    assert torch.device(recorded[0][1]).type == "cpu"
+    assert recorded[1][0] is True
+    assert torch.device(recorded[1][1]).type == "cpu"
+    assert isinstance(wrapped._warmup_embeddings, torch.Tensor)
+    assert isinstance(wrapped._current_embedding, torch.Tensor)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_walkforward_pca_transformer_cuda_matches_cpu() -> None:
+    values = np.array(
+        [
+            [1.0, 10.0, 3.0],
+            [2.0, 11.0, 5.0],
+            [4.0, 13.0, 9.0],
+            [7.0, 16.0, 15.0],
+            [11.0, 20.0, 23.0],
+            [16.0, 25.0, 33.0],
+        ],
+        dtype=np.float32,
+    )
+
+    cpu_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        device="cpu",
+    )
+    cuda_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        device="cuda",
+    )
+
+    cpu_projected = cpu_transformer.walkforward_transform(values)
+    cuda_projected = cuda_transformer.walkforward_transform(values)
+
+    np.testing.assert_allclose(cuda_projected, cpu_projected, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_walkforward_pca_dataframe_cuda_matches_cpu() -> None:
+    df = _make_pca_dataframe()
+
+    cpu_result = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        trim_warmup=True,
+    )
+    cuda_result = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cuda",
+        trim_warmup=True,
+    )
+
+    np.testing.assert_allclose(
+        cuda_result.filter(like="pca_").to_numpy(dtype=np.float32),
+        cpu_result.filter(like="pca_").to_numpy(dtype=np.float32),
+        atol=1e-5,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_walkforward_chronos_pca_wrapper_cuda_returns_numpy_observations(
+    fake_chronos,
+) -> None:
+    df = _make_pca_dataframe()
+    lookback = 3
+    warmup = 3
+
+    env = _SequentialWindowEnv(
+        df=df,
+        feature_columns=["Open", "Close", "Volume"],
+        window_size=lookback,
+        frame_bound=(lookback + warmup, len(df)),
+    )
+    wrapped = WalkForwardChronosPCAWrapper(
+        env,
+        lookback=lookback,
+        warmup=warmup,
+        feature_columns=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+        device_map="cuda",
+    )
+
+    obs, _ = wrapped.reset()
+
+    assert isinstance(obs, np.ndarray)
+    assert obs.dtype == np.float32

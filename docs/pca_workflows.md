@@ -28,6 +28,26 @@ CrossLearn avoids that by using an expanding walk-forward procedure:
 
 The component count stays fixed after the initial warmup fit, but the scaling statistics and loadings are recomputed walk-forward at every step.
 
+## GPU Acceleration
+
+Chronos embedding and walk-forward PCA behave differently from a hardware point
+of view:
+
+- `embed_dataframe(...)` can batch many windows together, so GPU utilization is
+  naturally high when Chronos runs on CUDA
+- walk-forward PCA is still sequential by design, because each step must refit
+  on past rows only
+
+CrossLearn still uses CUDA when available for the heavy PCA math inside each
+step:
+
+- `WalkForwardPCATransformer(..., device="auto")`
+- `walkforward_pca_dataframe(..., device="auto")`
+- `WalkForwardChronosPCAWrapper(..., device_map="auto")`
+
+That means the SVD, centering, scaling, and projection work can run on GPU even
+though the chronological loop itself remains sequential.
+
 ## Core APIs
 
 ### `WalkForwardPCATransformer`
@@ -41,6 +61,7 @@ transformer = WalkForwardPCATransformer(
     warmup=500,
     explained_variance_threshold=0.99,
     standardize=True,
+    device="auto",
 )
 
 projected = transformer.walkforward_transform(values)
@@ -53,6 +74,7 @@ Behavior:
 - `n_components_` is chosen once from the initial warmup fit
 - `standardize=True` recomputes mean and standard deviation walk-forward
 - `standardize=False` still recomputes the mean walk-forward, but skips division by standard deviation
+- `device="auto"` prefers CUDA when available
 - component signs are aligned against the previous fit to reduce arbitrary sign flips
 
 ### `walkforward_pca_dataframe`
@@ -68,6 +90,7 @@ pca_df = walkforward_pca_dataframe(
     warmup=500,
     explained_variance_threshold=0.99,
     standardize=True,
+    device="auto",
     output_prefix="pca_",
     drop_feature_columns=False,
     trim_warmup=False,
@@ -80,6 +103,7 @@ Key arguments:
 - `feature_columns`: source columns to reduce
 - `warmup`: number of rows required before the first PCA-transformed row is available
 - `standardize`: when `True`, mean and standard deviation are both fit walk-forward
+- `device`: torch device for PCA math; `"auto"` prefers CUDA when available
 - `drop_feature_columns`: drops only the columns named in `feature_columns`
 - `trim_warmup`: drops the first `warmup` rows instead of leaving `NaN` in the PCA columns
 - `progress_bar`: shows a `tqdm` row-by-row progress bar for the walk-forward PCA pass
@@ -109,6 +133,7 @@ pca_df = walkforward_pca_dataframe(
     warmup=500,
     explained_variance_threshold=0.99,
     standardize=True,
+    device="auto",
     output_prefix="pca_",
     drop_feature_columns=True,
     trim_warmup=True,
@@ -135,6 +160,7 @@ wrapped_env = WalkForwardChronosPCAWrapper(
     warmup=500,
     feature_columns=["Open", "High", "Low", "Close", "Volume"],
     selected_columns=["Close", "Volume"],
+    device_map="auto",
 )
 ```
 
@@ -151,6 +177,10 @@ Runtime behavior:
 - at wrapper construction, CrossLearn embeds only the warmup windows needed to determine the fixed PCA width
 - at `reset()`, it embeds the current raw window and projects it with the PCA fit from the warmup embedding history
 - at each `step()`, it appends the previously used embedding to the PCA history, refits PCA on that expanding history, embeds only the newly returned raw window, and projects only that new embedding
+
+`device_map` controls both Chronos embedding placement and the internal PCA
+math in the wrapper. With `device_map="auto"`, CrossLearn prefers CUDA when it
+is available.
 
 That means the first observation returned to the agent is the first post-skip observation, already PCA-ready, and every later observation is computed online from one newly embedded raw window plus an expanding PCA history that only contains past embeddings.
 
