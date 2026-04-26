@@ -104,6 +104,23 @@ def _manual_initial_projection(
     return (target_transformed @ components.T).astype(np.float32), n_components
 
 
+def test_make_walkforward_windows_builds_history_target_pairs() -> None:
+    windows = pca_module._make_walkforward_windows(total_rows=8, warmup=3)
+
+    np.testing.assert_array_equal(
+        windows[:4],
+        np.array(
+            [
+                [3, 4],
+                [4, 5],
+                [5, 6],
+                [6, 7],
+            ],
+            dtype=np.int64,
+        ),
+    )
+
+
 class _SequentialWindowEnv(gym.Env):
     metadata = {}
 
@@ -162,6 +179,7 @@ def test_walkforward_pca_transformer_matches_manual_first_projection() -> None:
         explained_variance_threshold=0.95,
         standardize=True,
         device="cpu",
+        batch_size=1,
     )
 
     projected = transformer.walkforward_transform(values)
@@ -192,6 +210,7 @@ def test_walkforward_pca_transformer_center_only_matches_manual_first_projection
         explained_variance_threshold=0.9,
         standardize=False,
         device="cpu",
+        batch_size=1,
     )
 
     projected = transformer.walkforward_transform(values)
@@ -204,6 +223,40 @@ def test_walkforward_pca_transformer_center_only_matches_manual_first_projection
 
     assert transformer.n_components_ == expected_n_components
     np.testing.assert_allclose(projected[0], expected_first, atol=1e-5)
+
+
+def test_walkforward_pca_transformer_batching_matches_rowwise_cpu() -> None:
+    values = np.array(
+        [
+            [1.0, 10.0, 3.0],
+            [2.0, 11.0, 5.0],
+            [4.0, 13.0, 9.0],
+            [7.0, 16.0, 15.0],
+            [11.0, 20.0, 23.0],
+            [16.0, 25.0, 33.0],
+            [22.0, 31.0, 45.0],
+        ],
+        dtype=np.float32,
+    )
+    rowwise = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        device="cpu",
+        batch_size=1,
+    )
+    batched = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        device="cpu",
+        batch_size=3,
+    )
+
+    rowwise_projected = rowwise.walkforward_transform(values)
+    batched_projected = batched.walkforward_transform(values)
+
+    np.testing.assert_allclose(batched_projected, rowwise_projected, atol=1e-5)
 
 
 def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
@@ -238,6 +291,35 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
     assert set(trimmed.columns) == set(pca_columns)
 
 
+def test_walkforward_pca_dataframe_batching_matches_rowwise_cpu() -> None:
+    df = _make_pca_dataframe()
+
+    rowwise = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        batch_size=1,
+        trim_warmup=True,
+    )
+    batched = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        batch_size=3,
+        trim_warmup=True,
+    )
+
+    np.testing.assert_allclose(
+        batched.filter(like="pca_").to_numpy(dtype=np.float32),
+        rowwise.filter(like="pca_").to_numpy(dtype=np.float32),
+        atol=1e-5,
+    )
+
+
 def test_walkforward_pca_dataframe_progress_bar_matches_default(
     monkeypatch,
 ) -> None:
@@ -250,6 +332,7 @@ def test_walkforward_pca_dataframe_progress_bar_matches_default(
         warmup=3,
         standardize=True,
         device="cpu",
+        batch_size=2,
     )
     with_progress = walkforward_pca_dataframe(
         df,
@@ -257,6 +340,7 @@ def test_walkforward_pca_dataframe_progress_bar_matches_default(
         warmup=3,
         standardize=True,
         device="cpu",
+        batch_size=2,
         progress_bar=True,
     )
 
@@ -277,6 +361,7 @@ def test_walkforward_pca_dataframe_progress_bar_tracks_rows(monkeypatch) -> None
         warmup=3,
         standardize=True,
         device="cpu",
+        batch_size=2,
         progress_bar=True,
     )
 
@@ -286,7 +371,7 @@ def test_walkforward_pca_dataframe_progress_bar_tracks_rows(monkeypatch) -> None
     assert bars[0].unit == "row"
     assert bars[0].desc == "Walk-forward PCA"
     assert bars[0].dynamic_ncols is True
-    assert bars[0].updates == [1, 1, 1, 1, 1]
+    assert bars[0].updates == [2, 2, 1]
     assert bars[0].closed is True
 
 
@@ -403,6 +488,7 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         explained_variance_threshold=0.99,
         standardize=True,
         device="cpu",
+        batch_size=2,
         output_prefix="pca_",
         drop_feature_columns=True,
         trim_warmup=True,
@@ -610,12 +696,14 @@ def test_walkforward_pca_transformer_cuda_matches_cpu() -> None:
         explained_variance_threshold=0.95,
         standardize=True,
         device="cpu",
+        batch_size=2,
     )
     cuda_transformer = WalkForwardPCATransformer(
         warmup=3,
         explained_variance_threshold=0.95,
         standardize=True,
         device="cuda",
+        batch_size=2,
     )
 
     cpu_projected = cpu_transformer.walkforward_transform(values)
@@ -634,6 +722,7 @@ def test_walkforward_pca_dataframe_cuda_matches_cpu() -> None:
         warmup=3,
         standardize=True,
         device="cpu",
+        batch_size=2,
         trim_warmup=True,
     )
     cuda_result = walkforward_pca_dataframe(
@@ -642,6 +731,7 @@ def test_walkforward_pca_dataframe_cuda_matches_cpu() -> None:
         warmup=3,
         standardize=True,
         device="cuda",
+        batch_size=2,
         trim_warmup=True,
     )
 

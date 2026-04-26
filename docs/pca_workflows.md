@@ -39,14 +39,23 @@ of view:
   on past rows only
 
 CrossLearn still uses CUDA when available for the heavy PCA math inside each
-step:
+offline batch or online step:
 
 - `WalkForwardPCATransformer(..., device="auto")`
 - `walkforward_pca_dataframe(..., device="auto")`
 - `WalkForwardChronosPCAWrapper(..., device_map="auto")`
 
 That means the SVD, centering, scaling, and projection work can run on GPU even
-though the chronological loop itself remains sequential.
+though the chronology itself remains sequential.
+
+For the offline helpers, CrossLearn prepares the walk-forward prefix windows
+ahead of time and processes them in batches:
+
+- `WalkForwardPCATransformer(..., batch_size=256)`
+- `walkforward_pca_dataframe(..., batch_size=256)`
+
+The online wrapper does not do this. It remains one new embedding and one new
+projection at a time by design.
 
 ## Core APIs
 
@@ -62,6 +71,7 @@ transformer = WalkForwardPCATransformer(
     explained_variance_threshold=0.99,
     standardize=True,
     device="auto",
+    batch_size=256,
 )
 
 projected = transformer.walkforward_transform(values)
@@ -75,6 +85,8 @@ Behavior:
 - `standardize=True` recomputes mean and standard deviation walk-forward
 - `standardize=False` still recomputes the mean walk-forward, but skips division by standard deviation
 - `device="auto"` prefers CUDA when available
+- `batch_size` controls how many prepared walk-forward prefix windows are
+  processed per offline batched SVD call
 - component signs are aligned against the previous fit to reduce arbitrary sign flips
 
 ### `walkforward_pca_dataframe`
@@ -91,6 +103,7 @@ pca_df = walkforward_pca_dataframe(
     explained_variance_threshold=0.99,
     standardize=True,
     device="auto",
+    batch_size=256,
     output_prefix="pca_",
     drop_feature_columns=False,
     trim_warmup=False,
@@ -104,9 +117,12 @@ Key arguments:
 - `warmup`: number of rows required before the first PCA-transformed row is available
 - `standardize`: when `True`, mean and standard deviation are both fit walk-forward
 - `device`: torch device for PCA math; `"auto"` prefers CUDA when available
+- `batch_size`: number of chronological PCA windows processed together in the
+  offline batched path
 - `drop_feature_columns`: drops only the columns named in `feature_columns`
 - `trim_warmup`: drops the first `warmup` rows instead of leaving `NaN` in the PCA columns
-- `progress_bar`: shows a `tqdm` row-by-row progress bar for the walk-forward PCA pass
+- `progress_bar`: shows a `tqdm` progress bar for the walk-forward PCA pass;
+  the total is still measured in rows, but updates happen chunk by chunk
 
 ## Offline Chronos + PCA
 
@@ -134,6 +150,7 @@ pca_df = walkforward_pca_dataframe(
     explained_variance_threshold=0.99,
     standardize=True,
     device="auto",
+    batch_size=256,
     output_prefix="pca_",
     drop_feature_columns=True,
     trim_warmup=True,
@@ -177,6 +194,10 @@ Runtime behavior:
 - at wrapper construction, CrossLearn embeds only the warmup windows needed to determine the fixed PCA width
 - at `reset()`, it embeds the current raw window and projects it with the PCA fit from the warmup embedding history
 - at each `step()`, it appends the previously used embedding to the PCA history, refits PCA on that expanding history, embeds only the newly returned raw window, and projects only that new embedding
+
+This online path deliberately does not prepare future PCA windows in batches.
+That batching optimization is reserved for the offline PCA helpers, where the
+full chronological matrix is already available.
 
 `device_map` controls both Chronos embedding placement and the internal PCA
 math in the wrapper. With `device_map="auto"`, CrossLearn prefers CUDA when it

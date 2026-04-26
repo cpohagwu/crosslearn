@@ -10,6 +10,8 @@ import torch
 
 from crosslearn._devices import resolve_device
 
+_PCA_BATCH_SIZE = 256
+
 
 @dataclass
 class _PCAFitState:
@@ -57,6 +59,15 @@ def _as_2d_float_tensor(
 
 def _to_numpy_float32(values: torch.Tensor) -> np.ndarray:
     return values.detach().to(device="cpu", dtype=torch.float32).numpy()
+
+
+def _make_walkforward_windows(total_rows: int, warmup: int) -> np.ndarray:
+    if total_rows <= warmup:
+        return np.empty((0, 2), dtype=np.int64)
+
+    history_stops = np.arange(warmup, total_rows, dtype=np.int64)
+    target_stops = history_stops + 1
+    return np.stack((history_stops, target_stops), axis=1)
 
 
 def _select_n_components(
@@ -164,6 +175,97 @@ def _project_rows(values: torch.Tensor | np.ndarray, state: _PCAFitState) -> tor
     return projected.to(dtype=torch.float32)
 
 
+def _fit_pca_batch(
+    values_f64: torch.Tensor,
+    history_stops: torch.Tensor,
+    *,
+    standardize: bool,
+    n_components: int,
+    cumulative: torch.Tensor | None = None,
+    cumulative_sq: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if history_stops.ndim != 1:
+        raise ValueError("history_stops must be a 1D tensor.")
+    if history_stops.numel() == 0:
+        raise ValueError("history_stops must contain at least one value.")
+
+    max_history = int(history_stops[-1].item())
+    base_history = values_f64[:max_history]
+    history_lengths = history_stops.to(dtype=torch.float64)
+
+    if cumulative is None:
+        cumulative = torch.cumsum(values_f64, dim=0)
+    history_sum = cumulative[history_stops - 1]
+    mean = history_sum / history_lengths.unsqueeze(1)
+
+    if standardize:
+        if cumulative_sq is None:
+            cumulative_sq = torch.cumsum(values_f64.square(), dim=0)
+        history_sq_sum = cumulative_sq[history_stops - 1]
+        variance = history_sq_sum / history_lengths.unsqueeze(1) - mean.square()
+        variance = torch.clamp(variance, min=0.0)
+        raw_scale = torch.sqrt(variance)
+        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
+    else:
+        scale = torch.ones_like(mean)
+
+    positions = torch.arange(max_history, device=values_f64.device)
+    mask = positions.unsqueeze(0) < history_stops.unsqueeze(1)
+    transformed_history = (
+        (base_history.unsqueeze(0) - mean.unsqueeze(1)) / scale.unsqueeze(1)
+    ) * mask.unsqueeze(-1).to(dtype=values_f64.dtype)
+
+    _, singular_values, vt = torch.linalg.svd(transformed_history, full_matrices=False)
+    explained_variance = singular_values.square()
+    total_variance = explained_variance.sum(dim=1, keepdim=True)
+    explained_variance_ratio = torch.where(
+        total_variance > 0.0,
+        explained_variance / total_variance,
+        torch.zeros_like(explained_variance),
+    )
+    components = vt[:, :n_components].clone()
+
+    return mean, scale, components, explained_variance_ratio
+
+
+def _project_rows_batch(
+    values: torch.Tensor | np.ndarray,
+    mean: torch.Tensor,
+    scale: torch.Tensor,
+    components: torch.Tensor,
+) -> torch.Tensor:
+    values_f32 = _as_2d_float_tensor(
+        values,
+        device=mean.device,
+        dtype=torch.float32,
+    )
+    values_f64 = values_f32.to(dtype=torch.float64)
+    transformed = (values_f64 - mean) / scale
+    projected = torch.einsum("bf,bkf->bk", transformed, components)
+    return projected.to(dtype=torch.float32)
+
+
+def _align_component_signs_batch(
+    components: torch.Tensor,
+    reference_components: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    aligned = components.clone()
+    current_reference = reference_components.clone()
+    limit = min(int(current_reference.shape[0]), int(aligned.shape[1]))
+
+    for index in range(int(aligned.shape[0])):
+        dot_products = torch.sum(
+            aligned[index, :limit] * current_reference[:limit],
+            dim=1,
+        )
+        flip_mask = dot_products < 0.0
+        if torch.any(flip_mask):
+            aligned[index, :limit][flip_mask] *= -1.0
+        current_reference = aligned[index].clone()
+
+    return aligned, current_reference
+
+
 class WalkForwardPCATransformer:
     """Expanding-window PCA with walk-forward scaling and projections.
 
@@ -186,6 +288,8 @@ class WalkForwardPCATransformer:
             but not variance-scaled.
         device: Torch device for PCA math. ``"auto"`` prefers CUDA when
             available.
+        batch_size: Number of walk-forward prefix windows to batch together per
+            batched SVD call in the offline path.
 
     Example::
 
@@ -205,6 +309,7 @@ class WalkForwardPCATransformer:
         explained_variance_threshold: float = 0.99,
         standardize: bool = True,
         device: str | torch.device = "auto",
+        batch_size: int = _PCA_BATCH_SIZE,
     ) -> None:
         if warmup < 2:
             raise ValueError("warmup must be at least 2 for PCA.")
@@ -212,11 +317,14 @@ class WalkForwardPCATransformer:
             raise ValueError(
                 "explained_variance_threshold must be in the interval (0, 1]."
             )
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1.")
 
         self.warmup = int(warmup)
         self.explained_variance_threshold = float(explained_variance_threshold)
         self.standardize = bool(standardize)
         self.device = resolve_device(device)
+        self.batch_size = int(batch_size)
 
         self.n_features_in_: int | None = None
         self.n_components_: int | None = None
@@ -333,16 +441,18 @@ class WalkForwardPCATransformer:
         """Project each row using PCA refit on the expanding past only.
 
         The method first calls ``fit(...)`` on the initial warmup window to
-        determine ``n_components_``. It then iterates from row ``warmup`` to
-        the end of the matrix, refitting PCA on rows ``[:end_index]`` and
-        projecting only row ``end_index``. The output therefore starts at the
-        first chronologically valid next-row projection.
+        determine ``n_components_``. It then prepares chronological
+        ``(history_stop, target_stop)`` windows once, processes those windows
+        in chunks of ``batch_size``, refits PCA on rows ``[:history_stop]``,
+        and projects only the corresponding next row. The output therefore
+        starts at the first chronologically valid next-row projection.
 
         Args:
             values: 2D array-like input of shape ``(n_rows, n_features)`` in
                 chronological order.
             progress_bar: If ``True``, show a ``tqdm`` progress bar over the
-                row-by-row walk-forward loop.
+                chunked walk-forward loop. The bar still counts projected rows,
+                even though updates happen chunk by chunk.
 
         Returns:
             A ``float32`` array of shape ``(n_rows - warmup, n_components_)``.
@@ -361,27 +471,59 @@ class WalkForwardPCATransformer:
         assert self.n_components_ is not None
         assert self._fit_state is not None
 
+        windows = _make_walkforward_windows(int(array.shape[0]), self.warmup)
+        if windows.size == 0:
+            return np.empty((0, self.n_components_), dtype=np.float32)
+
+        values_f64 = array.to(dtype=torch.float64)
+        cumulative = torch.cumsum(values_f64, dim=0)
+        cumulative_sq = (
+            torch.cumsum(values_f64.square(), dim=0) if self.standardize else None
+        )
+        windows_t = torch.as_tensor(windows, device=self.device, dtype=torch.int64)
+
         projected_rows: list[torch.Tensor] = []
         reference_components = self._fit_state.components.clone()
         latest_state = self._fit_state
 
-        total_rows = max(int(array.shape[0]) - self.warmup, 0)
+        total_rows = int(windows_t.shape[0])
         progress = _make_dataframe_progress_bar(total_rows) if progress_bar else None
         try:
-            for end_index in range(self.warmup, int(array.shape[0])):
-                fit_state = _fit_pca(
-                    array[:end_index],
+            for start in range(0, total_rows, self.batch_size):
+                stop = min(start + self.batch_size, total_rows)
+                chunk = windows_t[start:stop]
+                history_stops = chunk[:, 0]
+                target_indices = chunk[:, 1] - 1
+
+                mean, scale, components, explained_variance_ratio = _fit_pca_batch(
+                    values_f64,
+                    history_stops,
                     standardize=self.standardize,
                     n_components=self.n_components_,
-                    reference_components=reference_components,
+                    cumulative=cumulative,
+                    cumulative_sq=cumulative_sq,
                 )
+                aligned_components, reference_components = _align_component_signs_batch(
+                    components,
+                    reference_components,
+                )
+
                 projected_rows.append(
-                    _project_rows(array[end_index : end_index + 1], fit_state)[0]
+                    _project_rows_batch(
+                        array[target_indices],
+                        mean,
+                        scale,
+                        aligned_components,
+                    )
                 )
-                reference_components = fit_state.components.clone()
-                latest_state = fit_state
+                latest_state = _PCAFitState(
+                    mean=mean[-1].clone(),
+                    scale=scale[-1].clone(),
+                    components=aligned_components[-1].clone(),
+                    explained_variance_ratio=explained_variance_ratio[-1].clone(),
+                )
                 if progress is not None:
-                    progress.update(1)
+                    progress.update(stop - start)
         finally:
             if progress is not None:
                 progress.close()
@@ -389,9 +531,7 @@ class WalkForwardPCATransformer:
         self._fit_state = latest_state
         self._update_public_state(latest_state)
 
-        if not projected_rows:
-            return np.empty((0, self.n_components_), dtype=np.float32)
-        return _to_numpy_float32(torch.stack(projected_rows, dim=0))
+        return _to_numpy_float32(torch.cat(projected_rows, dim=0))
 
 
 def walkforward_pca_dataframe(
@@ -402,6 +542,7 @@ def walkforward_pca_dataframe(
     explained_variance_threshold: float = 0.99,
     standardize: bool = True,
     device: str | torch.device = "auto",
+    batch_size: int = _PCA_BATCH_SIZE,
     output_prefix: str = "pca_",
     drop_feature_columns: bool = False,
     trim_warmup: bool = False,
@@ -428,13 +569,15 @@ def walkforward_pca_dataframe(
             PCA fit. If ``False``, only walk-forward centering is applied.
         device: Torch device for PCA math. ``"auto"`` prefers CUDA when
             available.
+        batch_size: Number of walk-forward prefix windows to batch together per
+            batched SVD call.
         output_prefix: Prefix for appended PCA columns.
         drop_feature_columns: If ``True``, drop the original
             ``feature_columns`` after adding the PCA columns.
         trim_warmup: If ``True``, drop the leading warmup rows and reset the
             index so the returned dataframe contains only valid projections.
         progress_bar: If ``True``, show a ``tqdm`` progress bar over the
-            walk-forward PCA loop.
+            chunked walk-forward PCA loop.
 
     Returns:
         A copy of ``df`` with appended ``{output_prefix}*`` PCA columns. The
@@ -462,6 +605,7 @@ def walkforward_pca_dataframe(
             warmup=500,
             explained_variance_threshold=0.99,
             device="auto",
+            batch_size=256,
             trim_warmup=True,
         )
     """
@@ -491,6 +635,7 @@ def walkforward_pca_dataframe(
         explained_variance_threshold=explained_variance_threshold,
         standardize=standardize,
         device=device,
+        batch_size=batch_size,
     )
     projected = transformer.walkforward_transform(values, progress_bar=progress_bar)
 
