@@ -1,5 +1,5 @@
 from crosslearn.agents.reinforce import REINFORCE
-from crosslearn.envs import AtariPreprocessor
+from crosslearn.envs import AtariPreprocessor, WalkForwardChronosPCAWrapper
 from crosslearn.envs.utils import make_vec_env
 from crosslearn.registry import list_agents, make_agent
 from crosslearn.callbacks import (
@@ -19,12 +19,13 @@ from crosslearn.extractors import (
     NatureCNNExtractor,
 )
 
-__version__ = "0.3.14"
+__version__ = "0.3.15"
 
 __all__ = [
     "REINFORCE",
     "make_vec_env",
     "AtariPreprocessor",
+    "WalkForwardChronosPCAWrapper",
     "make_agent",
     "list_agents",
     "BaseCallback",

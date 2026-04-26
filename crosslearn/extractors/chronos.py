@@ -318,7 +318,49 @@ def _normalize_frame_bound(frame_bound: Sequence[int]) -> tuple[int, int]:
 
 
 class ChronosEmbedder:
-    """Frozen Chronos utility for online and offline rolling-window embeddings."""
+    """Frozen Chronos wrapper for online and offline rolling-window embeddings.
+
+    This utility loads a pretrained Chronos pipeline once and exposes two
+    user-facing workflows:
+
+    - ``embed_windows(...)`` embeds one or more rolling windows directly
+    - ``transform_dataframe(...)`` appends aligned ``chronos_*`` columns to a
+      full dataframe
+
+    "Frozen" means the Chronos model is used in inference mode only. The
+    package does not fine-tune the Chronos weights.
+
+    Feature selection happens before the batch is sent to Chronos. Provide
+    ``feature_names`` to name the raw feature axis, then optionally keep only a
+    subset with ``selected_columns`` or ``selected_indices``.
+
+    Args:
+        model_name: Hugging Face or Chronos model identifier to load.
+            Default: ``"amazon/chronos-2"``.
+        pooling: How token-level Chronos embeddings are pooled into one vector
+            per input window. ``"mean"`` averages token embeddings and
+            ``"last"`` keeps the last token embedding.
+        feature_names: Optional names for the raw feature axis. These are used
+            to resolve ``selected_columns`` and to document the expected feature
+            ordering.
+        selected_columns: Optional subset of ``feature_names`` to embed by
+            name. Mutually exclusive with ``selected_indices``.
+        selected_indices: Optional subset of feature positions to embed by
+            index. Mutually exclusive with ``selected_columns``.
+        device_map: Target device for the Chronos model, for example
+            ``"auto"``, ``"cpu"``, or ``"cuda"``.
+        dtype: Torch dtype used when loading the Chronos pipeline.
+
+    Example::
+
+        embedder = ChronosEmbedder(
+            feature_names=["open", "high", "low", "close"],
+            pooling="mean",
+        )
+        window = np.zeros((32, 4), dtype=np.float32)
+        embedding = embedder.embed_windows(window, lookback=32, n_features=4)
+        embedding.shape  # (1, embedding_dim)
+    """
 
     def __init__(
         self,
@@ -377,7 +419,49 @@ class ChronosEmbedder:
         as_tensor: bool = False,
         output_device: torch.device | str | None = None,
     ) -> np.ndarray | torch.Tensor:
-        """Embed one or more windows and return one vector per window."""
+        """Embed one or more rolling windows and return one vector per window.
+
+        Accepted input layouts are:
+
+        - flat 1D window: ``(lookback * n_features,)``
+        - 2D single window: ``(lookback, n_features)``
+        - 2D batch of flat windows: ``(batch, lookback * n_features)``
+        - 3D batch of windows: ``(batch, lookback, n_features)``
+
+        Args:
+            windows: One window or a batch of windows in any supported layout.
+            lookback: Number of timesteps per window. Required when the input is
+                flat or when the layout cannot be inferred unambiguously.
+            n_features: Number of raw features per timestep. Optional when the
+                layout already implies it.
+            feature_names: Optional feature names for this call. When omitted,
+                ``self.feature_names`` is used.
+            as_tensor: If ``True``, return a ``torch.Tensor``. Otherwise return
+                a CPU ``numpy.ndarray``.
+            output_device: Target device for tensor outputs when
+                ``as_tensor=True``. Defaults to the embedder device.
+
+        Returns:
+            One pooled Chronos embedding per input window with shape
+            ``(batch, embedding_dim)`` and dtype ``float32``. NumPy outputs are
+            always returned on CPU. Tensor outputs are moved to
+            ``output_device`` when provided.
+
+        Raises:
+            ValueError: If the window shape is incompatible with
+                ``lookback``/``n_features`` or if feature selection cannot be
+                resolved.
+
+        Example::
+
+            batch = np.zeros((8, 32, 4), dtype=np.float32)
+            embeddings = embedder.embed_windows(
+                batch,
+                lookback=32,
+                n_features=4,
+            )
+            embeddings.shape  # (8, embedding_dim)
+        """
         normalized_windows, _, inferred_features = _normalize_window_batch(
             windows,
             lookback=lookback,
@@ -461,8 +545,41 @@ class ChronosEmbedder:
     ) -> Any:
         """Append aligned Chronos embedding columns to a dataframe.
 
-        Set ``progress_bar=True`` to batch the offline embedding pass and show a
-        ``tqdm`` progress bar.
+        The returned dataframe has the same length and index as ``df``. The
+        first ``lookback - 1`` rows in the new embedding columns are ``NaN``
+        because there is not yet enough history to form a complete rolling
+        window.
+
+        When ``columns`` is omitted, the embedder uses ``self.feature_names`` if
+        available, otherwise all numeric dataframe columns.
+
+        Args:
+            df: Source pandas dataframe in chronological order.
+            lookback: Number of rows per rolling window.
+            columns: Source dataframe columns to read before any optional
+                ``selected_columns`` or ``selected_indices`` filtering is
+                applied.
+            output_prefix: Prefix for the appended embedding columns.
+            progress_bar: If ``True``, batch the offline embedding pass and show
+                a ``tqdm`` progress bar.
+
+        Returns:
+            A copy of ``df`` with appended ``{output_prefix}*`` embedding
+            columns aligned to the original index.
+
+        Raises:
+            TypeError: If ``df`` is not a pandas dataframe.
+            ValueError: If the source columns are missing or no usable numeric
+                columns can be resolved.
+
+        Example::
+
+            embedded = embedder.transform_dataframe(
+                df,
+                lookback=32,
+                columns=["open", "high", "low", "close"],
+            )
+            embedded.filter(like="chronos_").iloc[:31].isna().all().all()
         """
         try:
             import pandas as pd
@@ -524,7 +641,7 @@ class ChronosEmbedder:
         )
 
 
-def prepare_offline_dataframe(
+def embed_dataframe(
     df: Any,
     *,
     lookback: int,
@@ -538,8 +655,62 @@ def prepare_offline_dataframe(
     pooling: PoolingMode = "mean",
     device_map: str = "auto",
     dtype: torch.dtype = torch.float32,
+    drop_feature_columns: bool = False,
 ) -> Any:
-    """Build a trimmed offline Chronos dataframe for dataframe-backed environments."""
+    """Build a trimmed offline Chronos dataframe for dataframe-backed envs.
+
+    This helper mirrors the rolling-window alignment used by dataframe-backed
+    trading environments. It:
+
+    1. slices ``df.iloc[frame_bound[0] - lookback : frame_bound[1]]``
+    2. appends aligned Chronos embedding columns over that slice
+    3. drops the leading ``lookback - 1`` warmup rows
+    4. resets the index on the trimmed result
+
+    The returned rows therefore align with the windowed observation stream, not
+    the original raw dataframe index. In particular, the first returned row
+    corresponds to the first complete rolling window ending immediately before
+    the environment's first agent-visible index.
+
+    Args:
+        df: Source pandas dataframe in chronological order.
+        lookback: Number of rows per rolling window.
+        frame_bound: Two-element slice describing the environment span to
+            support. The helper uses the preceding ``lookback`` rows as history.
+        feature_columns: Raw dataframe columns to read before optional feature
+            selection is applied inside ``ChronosEmbedder``.
+        selected_columns: Optional subset of ``feature_columns`` to embed by
+            name.
+        selected_indices: Optional subset of ``feature_columns`` to embed by
+            position.
+        output_prefix: Prefix for appended embedding columns.
+        progress_bar: If ``True``, show the offline embedding progress.
+        model_name: Chronos model identifier.
+        pooling: Token pooling mode forwarded to ``ChronosEmbedder``.
+        device_map: Target device for the Chronos model.
+        dtype: Torch dtype used when loading Chronos.
+        drop_feature_columns: If ``True``, drop the original
+            ``feature_columns`` from the returned dataframe after embedding.
+
+    Returns:
+        A trimmed, reindexed dataframe containing one row per aligned
+        rolling-window observation, with appended ``chronos_*`` columns by
+        default.
+
+    Raises:
+        ValueError: If ``lookback`` or ``frame_bound`` are invalid, or if
+            ``feature_columns`` is empty.
+
+    Example::
+
+        embedded = embed_dataframe(
+            df,
+            lookback=32,
+            frame_bound=(32, len(df)),
+            feature_columns=["open", "high", "low", "close", "volume"],
+        )
+        embedded.filter(like="chronos_").head()
+    """
     if lookback <= 0:
         raise ValueError("lookback must be greater than 0.")
 
@@ -578,7 +749,10 @@ def prepare_offline_dataframe(
         output_prefix=output_prefix,
         progress_bar=progress_bar,
     )
-    return transformed.iloc[lookback - 1 :].reset_index(drop=True)
+    trimmed = transformed.iloc[lookback - 1 :].reset_index(drop=True)
+    if drop_feature_columns:
+        trimmed = trimmed.drop(columns=resolved_feature_columns)
+    return trimmed
 
 
 class ChronosExtractor(BaseFeaturesExtractor):
@@ -586,6 +760,56 @@ class ChronosExtractor(BaseFeaturesExtractor):
 
     This extractor is designed as a reusable backbone for Gymnasium and SB3
     policies rather than a reproduction of ChronosRL.
+
+    Each observation must represent exactly one rolling window, either as a 2D
+    matrix ``(lookback, n_features)`` or as a flat legacy vector
+    ``(lookback * n_features,)``. During policy execution a leading batch
+    dimension is added automatically, so typical model inputs look like
+    ``(batch, lookback, n_features)`` or ``(batch, lookback * n_features)``.
+
+    The extractor first obtains a frozen Chronos embedding for each
+    observation. If ``features_dim`` is omitted, that embedding is returned
+    directly. If ``features_dim`` differs from the raw Chronos embedding width,
+    the extractor adds a learned ``Linear + ReLU`` projection so downstream
+    policies still receive the requested feature dimension.
+
+    Use this extractor when the environment already emits raw rolling windows
+    and you only need fixed Chronos features. If you need online walk-forward
+    PCA before the policy sees each observation, wrap the environment with
+    ``WalkForwardChronosPCAWrapper`` instead.
+
+    Args:
+        observation_space: Window-shaped observation space. Supported layouts
+            are ``(lookback, n_features)`` and ``(lookback * n_features,)``.
+        features_dim: Output width seen by the policy. When omitted, the raw
+            Chronos embedding width is used.
+        model_name: Chronos model identifier. Default: ``"amazon/chronos-2"``.
+        lookback: Required for flat 1D observation spaces. Optional for 2D
+            observation spaces where it can be inferred.
+        n_features: Required for flat 1D observation spaces. Optional for 2D
+            observation spaces where it can be inferred.
+        freeze: Must remain ``True``. Trainable Chronos fine-tuning is not
+            supported in this extractor.
+        pooling: Token pooling mode used to turn Chronos token embeddings into
+            one vector per observation.
+        feature_names: Optional names for the raw feature axis.
+        selected_columns: Optional subset of ``feature_names`` to embed by
+            name.
+        selected_indices: Optional subset of feature positions to embed by
+            index.
+        device_map: Target device for the Chronos model.
+        dtype: Torch dtype used when loading Chronos.
+
+    Example::
+
+        extractor = ChronosExtractor(
+            env.observation_space,
+            lookback=32,
+            n_features=5,
+        )
+        obs = torch.zeros(8, 32, 5)
+        out = extractor(obs)
+        out.shape  # (8, extractor.features_dim)
     """
 
     def __init__(
@@ -655,6 +879,17 @@ class ChronosExtractor(BaseFeaturesExtractor):
             )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        """Encode a batch of rolling windows into Chronos feature vectors.
+
+        Args:
+            observations: Batch of raw windows in either window layout
+                ``(batch, lookback, n_features)`` or flat layout
+                ``(batch, lookback * n_features)``.
+
+        Returns:
+            A tensor of shape ``(batch, features_dim)`` on the same device as
+            ``observations``.
+        """
         embedded = self.embedder.embed_windows(
             observations,
             lookback=self.lookback,

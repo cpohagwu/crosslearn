@@ -11,14 +11,14 @@ import torch
 
 from crosslearn import REINFORCE
 from crosslearn.extractors import (
-    prepare_offline_dataframe as exported_prepare_offline_dataframe,
+    embed_dataframe as exported_embed_dataframe,
 )
 import crosslearn.extractors.chronos as chronos_module
 from crosslearn.extractors.base import BaseFeaturesExtractor
 from crosslearn.extractors.chronos import (
     ChronosEmbedder,
     ChronosExtractor,
-    prepare_offline_dataframe,
+    embed_dataframe,
 )
 
 
@@ -341,15 +341,15 @@ def test_chronos_embedder_transform_dataframe_requires_pandas(
         embedder.transform_dataframe(object(), lookback=3)
 
 
-def test_prepare_offline_dataframe_is_exported_from_extractors(fake_chronos) -> None:
-    assert exported_prepare_offline_dataframe is prepare_offline_dataframe
+def test_embed_dataframe_is_exported_from_extractors(fake_chronos) -> None:
+    assert exported_embed_dataframe is embed_dataframe
 
 
-def test_prepare_offline_dataframe_returns_trimmed_dataframe(
+def test_embed_dataframe_returns_trimmed_dataframe(
     fake_chronos,
 ) -> None:
     df = _make_chronos_dataframe()
-    offline_df = prepare_offline_dataframe(
+    offline_df = embed_dataframe(
         df,
         lookback=3,
         frame_bound=(3, len(df)),
@@ -373,6 +373,21 @@ def test_prepare_offline_dataframe_returns_trimmed_dataframe(
     assert fake_chronos.last_pipeline.calls[-1].shape == (3, 3, 2)
 
 
+def test_embed_dataframe_can_drop_embedded_feature_columns(fake_chronos) -> None:
+    df = _make_chronos_dataframe()
+
+    offline_df = embed_dataframe(
+        df,
+        lookback=3,
+        frame_bound=(3, len(df)),
+        feature_columns=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+        drop_feature_columns=True,
+    )
+
+    assert list(offline_df.columns) == ["chronos_0", "chronos_1", "chronos_2", "chronos_3"]
+
+
 @pytest.mark.parametrize(
     ("lookback", "frame_bound", "match"),
     [
@@ -382,7 +397,7 @@ def test_prepare_offline_dataframe_returns_trimmed_dataframe(
         (3, (3, 6), r"frame_bound\[1\] must be <= len\(df\)=5"),
     ],
 )
-def test_prepare_offline_dataframe_validates_frame_bounds(
+def test_embed_dataframe_validates_frame_bounds(
     fake_chronos,
     lookback: int,
     frame_bound: Sequence[int],
@@ -391,7 +406,7 @@ def test_prepare_offline_dataframe_validates_frame_bounds(
     df = _make_chronos_dataframe()
 
     with pytest.raises(ValueError, match=match):
-        prepare_offline_dataframe(
+        embed_dataframe(
             df,
             lookback=lookback,
             frame_bound=frame_bound,
