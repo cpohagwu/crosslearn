@@ -231,10 +231,6 @@ The design is deliberately straightforward: inherit from `BaseFeaturesExtractor`
 A key example is using Chronos, a pretrained time-series model, to create richer features from rolling windows of data (such as financial OHLCV). Rather than treating time-series as a niche case, `crosslearn` treats pretrained encoders as interchangeable backbones.
 The same approach extends naturally to image observations with stronger CNNs, multimodal models, or custom representation pipelines. By keeping the extractor layer reusable and decoupled from the agent, `crosslearn` enables faster experimentation and more effective learning across vector, image, and sequential data.
 
-## Development and Contributions
-- CrossLearn is actively being developed on [GitHub](https://github.com/cpohagwu/crosslearn). Please note that the API is subject to change as the library evolves, but we welcome contributions and feedback.
-- If you encounter any issues, have suggestions for improvements, or want to contribute new features, please open an [issue](https://github.com/cpohagwu/crosslearn/issues) or submit a [pull request](https://github.com/cpohagwu/crosslearn/pulls) on the GitHub repository.
-
 ## References
 
 - Williams, R. J. (1992). *Simple statistical gradient-following algorithms for connectionist reinforcement learning.*
@@ -242,6 +238,10 @@ The same approach extends naturally to image observations with stronger CNNs, mu
 - [Ansari et al. (2024), *Chronos: Learning the Language of Time Series*](https://openreview.net/forum?id=gerNCVqqtR)
 - [Ansari et al. (2025), *Chronos-2: From Univariate to Universal Forecasting*](https://arxiv.org/abs/2510.15821)
 - [Lima, Oliveira, and Zanchettin (2025), *ChronosRL: embeddings-based reinforcement learning agent for financial trading*](https://doi.org/10.1016/j.procs.2025.07.132)
+
+## Development and Contributions
+- CrossLearn is actively being developed on [GitHub](https://github.com/cpohagwu/crosslearn). Please note that the API is subject to change as the library evolves, but we welcome contributions and feedback.
+- If you encounter any issues, have suggestions for improvements, or want to contribute new features, please open an [issue](https://github.com/cpohagwu/crosslearn/issues) or submit a [pull request](https://github.com/cpohagwu/crosslearn/pulls) on the GitHub repository.
 
 ## License
 
