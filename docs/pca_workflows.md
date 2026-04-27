@@ -289,6 +289,7 @@ pca_df = walkforward_pca_dataframe(
     batch_size=128,
     output_prefix="pca_",
     drop_feature_columns=False,
+    return_transformed_warmup=True,
     trim_warmup=False,
     progress_bar=True,
 )
@@ -297,16 +298,18 @@ pca_df = walkforward_pca_dataframe(
 Key arguments:
 
 - `feature_columns`: source columns to reduce
-- `warmup`: number of rows required before the first PCA-transformed row is
-  available
+- `warmup`: number of rows required before the first future-safe next-row
+  projection is available
 - `solver`: `svd` or `covariance_eigh`
 - `expanding_warmup`: expanding history vs rolling history
 - `compute_dtype`: internal PCA precision
 - `device`: torch device for PCA math
 - `batch_size`: number of chronological PCA windows processed together in the
   offline path
-- `trim_warmup`: drops the first `warmup` rows instead of leaving `NaN` in the
-  PCA columns
+- `return_transformed_warmup`: when `True`, backfills the first `warmup` PCA
+  rows with the initial warmup fit-transform
+- `trim_warmup`: drops the first `warmup` rows entirely; when `False`, the
+  helper keeps the full dataframe length
 
 ## Offline Chronos + PCA
 
@@ -348,8 +351,12 @@ pca_df = walkforward_pca_dataframe(
 ```
 
 This gives you a new dataframe whose PCA columns are leakage-safe by
-construction. The dataset becomes shorter by `warmup` rows because the first
-PCA-transformed row is only available after the initial fit window.
+construction from row `warmup` onward. If `trim_warmup=True`, the dataset
+becomes shorter by `warmup` rows because only future-safe next-row projections
+are kept. If `trim_warmup=False`, the helper keeps the original dataframe
+length and, by default, fills the first `warmup` PCA rows with retrospective
+scores from the initial warmup fit. Set `return_transformed_warmup=False` to
+leave those warmup rows as `NaN` instead.
 
 ## Constrained Online Chronos + PCA
 

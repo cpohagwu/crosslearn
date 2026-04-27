@@ -904,15 +904,18 @@ def walkforward_pca_dataframe(
     batch_size: int = _PCA_BATCH_SIZE,
     output_prefix: str = "pca_",
     drop_feature_columns: bool = False,
-    trim_warmup: bool = False,
+    return_transformed_warmup: bool = False,
+    trim_warmup: bool = True,
     progress_bar: bool = False,
 ) -> Any:
     """Append walk-forward PCA columns to a dataframe.
 
-    The helper keeps the original dataframe length by default. The first
-    ``warmup`` rows in the new PCA columns are ``NaN`` because no
-    future-safe next-row projection exists for them yet. Set
-    ``trim_warmup=True`` to drop those rows and reset the index.
+    The helper keeps the original dataframe length by default. When
+    ``return_transformed_warmup=True``, the first ``warmup`` rows in the new
+    PCA columns contain the retrospective fit-transform from the initial
+    warmup PCA fit. Those rows are not future-safe next-row projections. Set
+    ``return_transformed_warmup=False`` to leave those rows as ``NaN`` instead,
+    or set ``trim_warmup=True`` to drop them and reset the index.
 
     This function composes cleanly with ``embed_dataframe(...)``: first build
     Chronos embeddings, then run walk-forward PCA over the resulting
@@ -940,6 +943,10 @@ def walkforward_pca_dataframe(
         output_prefix: Prefix for appended PCA columns.
         drop_feature_columns: If ``True``, drop the original
             ``feature_columns`` after adding the PCA columns.
+        return_transformed_warmup: If ``True``, populate the first ``warmup``
+            PCA rows with the initial warmup fit-transform. These rows are
+            retrospective PCA scores, not future-safe next-row projections. If
+            ``False``, leave them as ``NaN`` when ``trim_warmup=False``.
         trim_warmup: If ``True``, drop the leading warmup rows and reset the
             index so the returned dataframe contains only valid projections.
         progress_bar: If ``True``, show a ``tqdm`` progress bar over the
@@ -948,7 +955,9 @@ def walkforward_pca_dataframe(
     Returns:
         A copy of ``df`` with appended ``{output_prefix}*`` PCA columns. The
         returned dataframe has the same number of rows as ``df`` unless
-        ``trim_warmup=True``.
+        ``trim_warmup=True``. When ``trim_warmup=False`` and
+        ``return_transformed_warmup=True``, the leading warmup PCA rows are
+        filled with the initial fit-transform instead of ``NaN``.
 
     Raises:
         TypeError: If ``df`` is not a pandas dataframe.
@@ -1009,6 +1018,10 @@ def walkforward_pca_dataframe(
         device=device,
         batch_size=batch_size,
     )
+    warmup_projected = None
+    if return_transformed_warmup:
+        transformer.fit(values)
+        warmup_projected = transformer.transform(values[:warmup])
     projected = transformer.walkforward_transform(values, progress_bar=progress_bar)
 
     if transformer.n_components_ is None:
@@ -1023,6 +1036,8 @@ def walkforward_pca_dataframe(
         columns=pca_columns,
         dtype=np.float32,
     )
+    if warmup_projected is not None and warmup_projected.size > 0:
+        pca_frame.iloc[:warmup] = warmup_projected
     if projected.size > 0:
         pca_frame.iloc[warmup:] = projected
 

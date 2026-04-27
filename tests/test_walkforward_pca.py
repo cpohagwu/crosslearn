@@ -491,6 +491,17 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
         drop_feature_columns=False,
         trim_warmup=False,
     )
+    full_with_nan_warmup = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        output_prefix="pca_",
+        drop_feature_columns=False,
+        return_transformed_warmup=False,
+        trim_warmup=False,
+    )
     trimmed = walkforward_pca_dataframe(
         df,
         feature_columns=["Open", "Close", "Volume"],
@@ -501,13 +512,95 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
         drop_feature_columns=True,
         trim_warmup=True,
     )
+    trimmed_without_warmup_scores = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        output_prefix="pca_",
+        drop_feature_columns=True,
+        return_transformed_warmup=False,
+        trim_warmup=True,
+    )
 
     pca_columns = [column for column in full.columns if column.startswith("pca_")]
     assert pca_columns
-    assert full.loc[:2, pca_columns].isna().all().all()
+    assert not full.loc[:2, pca_columns].isna().any().any()
+    assert full_with_nan_warmup.loc[:2, pca_columns].isna().all().all()
+    np.testing.assert_allclose(
+        full.loc[3:, pca_columns].to_numpy(dtype=np.float32),
+        full_with_nan_warmup.loc[3:, pca_columns].to_numpy(dtype=np.float32),
+        atol=1e-5,
+    )
     assert len(trimmed) == len(df) - 3
     assert not trimmed[pca_columns].isna().any().any()
     assert set(trimmed.columns) == set(pca_columns)
+    np.testing.assert_allclose(
+        trimmed.to_numpy(dtype=np.float32),
+        trimmed_without_warmup_scores.to_numpy(dtype=np.float32),
+        atol=1e-5,
+    )
+
+
+def test_walkforward_pca_dataframe_returns_initial_warmup_fit_transform() -> None:
+    df = _make_pca_dataframe()
+    values = df.loc[:, ["Open", "Close", "Volume"]].to_numpy(dtype=np.float32)
+
+    transformed = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        batch_size=2,
+        trim_warmup=False,
+    )
+    pca_columns = [column for column in transformed.columns if column.startswith("pca_")]
+
+    transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.99,
+        standardize=True,
+        device="cpu",
+        batch_size=2,
+    )
+    transformer.fit(values)
+    expected_warmup = transformer.transform(values[:3])
+
+    np.testing.assert_allclose(
+        transformed.loc[:2, pca_columns].to_numpy(dtype=np.float32),
+        expected_warmup,
+        atol=1e-5,
+    )
+
+
+def test_walkforward_pca_dataframe_exact_warmup_length_handles_trim_modes() -> None:
+    df = _make_pca_dataframe().iloc[:3].reset_index(drop=True)
+
+    full = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        trim_warmup=False,
+    )
+    trimmed = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        trim_warmup=True,
+    )
+
+    pca_columns = [column for column in full.columns if column.startswith("pca_")]
+    assert len(full) == 3
+    assert pca_columns
+    assert not full[pca_columns].isna().any().any()
+    assert len(trimmed) == 0
+    assert list(trimmed.columns) == list(full.columns)
 
 
 def test_walkforward_pca_dataframe_batching_matches_rowwise_cpu() -> None:
