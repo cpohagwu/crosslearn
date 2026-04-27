@@ -108,6 +108,9 @@ This difference is more noticeable when:
 - trailing components are very small
 - `compute_dtype=torch.float32` is used
 
+See [Troubleshooting](#troubleshooting) for the practical implications of
+`covariance_eigh` with `compute_dtype=torch.float32` on CUDA.
+
 `compute_dtype=torch.float64` remains the default because it is the closest
 match to the current stable behavior.
 
@@ -159,6 +162,11 @@ GPU utilization is more likely to improve when:
 
 These are tendencies, not guarantees. The best-performing configuration is
 workload- and hardware-dependent.
+
+For difficult batches, maximizing GPU utilization with
+`solver="covariance_eigh"` and `compute_dtype=torch.float32` may also increase
+the chance of eigendecomposition convergence failures. See
+[Troubleshooting](#troubleshooting).
 
 ## Memory and `batch_size`
 
@@ -213,6 +221,11 @@ Practical reference points:
   `walkforward_pca_dataframe(..., device="cpu")`
 - the online wrapper supports the same idea through `device_map` for Chronos
   and `pca_device` for PCA
+
+`solver="covariance_eigh" + compute_dtype=torch.float32 + CUDA` is a
+performance-oriented but discouraged configuration because it is more likely to
+encounter convergence failures on ill-conditioned batches. See
+[Troubleshooting](#troubleshooting).
 
 ## Core APIs
 
@@ -408,6 +421,75 @@ When `standardize=True`, CrossLearn recomputes all three pieces walk-forward:
 - PCA loadings
 
 No future row is used when transforming the current row.
+
+## Troubleshooting
+
+### `_LinAlgError` with `solver="covariance_eigh"` on CUDA
+
+If you see an error like:
+
+```text
+torch.linalg.eigh(...): The algorithm failed to converge because the input
+matrix is ill-conditioned or has too many repeated eigenvalues
+```
+
+that is a known limitation of the covariance solver on some workloads,
+especially with:
+
+- `solver="covariance_eigh"`
+- `compute_dtype=torch.float32`
+- CUDA enabled
+
+Root cause:
+
+- the covariance solver uses batched `torch.linalg.eigh` on covariance or
+  correlation matrices
+- in `float32`, some of those matrices can become numerically ill-conditioned
+  enough for `eigh` to fail to converge
+- repeated or near-repeated eigenvalues make this more likely
+- `batch_size` changes which chronological windows are grouped together, so
+  some values such as `32` or `64` may fail while others do not on the same
+  dataset
+
+This is a convergence issue, not a leakage bug and not a chronology bug.
+
+This configuration is discouraged:
+
+- `solver="covariance_eigh" + compute_dtype=torch.float32 + CUDA`
+
+Recommended mitigations, in priority order:
+
+1. switch to `compute_dtype=torch.float64`
+2. switch to `solver="svd"`
+3. keep Chronos on GPU but run PCA on CPU
+4. if the issue appears only for some chunkings, try a different `batch_size`
+
+Split-device examples:
+
+- offline:
+  `walkforward_pca_dataframe(..., device="cpu")`
+- online:
+  `WalkForwardChronosPCAWrapper(..., pca_device="cpu")`
+
+Changing `batch_size` may help because it changes chunk composition, but it is
+not a guaranteed fix for convergence failures.
+
+### CPU or GPU Memory Allocation Errors
+
+If you hit a memory allocation error rather than a convergence error, the first
+thing to reduce is `batch_size`.
+
+Why this helps:
+
+- smaller `batch_size` lowers peak RAM or VRAM usage
+- expanding history chunks are usually heaviest near the end of the dataset
+- `float64` uses more memory than `float32`
+
+This is a different problem from `eigh` convergence:
+
+- lowering `batch_size` often helps memory errors
+- lowering `batch_size` does not guarantee fixing `covariance_eigh`
+  convergence failures
 
 ## Related APIs
 
