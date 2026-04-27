@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -14,6 +14,8 @@ from crosslearn.extractors.pca import (
     _project_rows,
     _select_n_components,
     _to_numpy_float32,
+    _validate_compute_dtype,
+    _validate_solver,
 )
 
 
@@ -36,8 +38,8 @@ class WalkForwardChronosPCAWrapper(
     3. embeds the current raw observation at reset and projects it with the
        warmup PCA fit
     4. on each step, appends the previously projected embedding to history,
-       refits PCA on that expanding history, embeds the newly returned raw
-       observation, and projects only that new embedding
+       refits PCA on either expanding or rolling history, embeds the newly
+       returned raw observation, and projects only that new embedding
 
     This keeps the Chronos and PCA computation online at the environment layer,
     while still preserving a stable observation-space width for the policy.
@@ -73,11 +75,20 @@ class WalkForwardChronosPCAWrapper(
         standardize: If ``True``, recompute mean/std walk-forward alongside the
             PCA loadings. If ``False``, PCA is still centered but not
             variance-scaled.
+        solver: PCA backend. ``"svd"`` uses direct singular-value
+            decomposition. ``"covariance_eigh"`` solves PCA from a square
+            covariance or correlation matrix derived from the selected history.
+        expanding_warmup: If ``True``, fit PCA on all available past embeddings
+            after warmup. If ``False``, fit PCA on exactly the last
+            ``warmup`` embeddings before each next observation projection.
+        compute_dtype: Internal torch dtype used for PCA math.
         progress_bar: Reserved for API parity with the offline helpers. The
             current online wrapper does not display a progress bar.
         model_name: Chronos model identifier. Default: ``"amazon/chronos-2"``.
         pooling: Token pooling mode forwarded to ``ChronosEmbedder``.
-        device_map: Target device for both Chronos and PCA math.
+        device_map: Target device for Chronos.
+        pca_device: Optional separate device for PCA math. When omitted,
+            CrossLearn uses the same resolved device as ``device_map``.
         dtype: Torch dtype used when loading Chronos.
 
     Example::
@@ -88,7 +99,11 @@ class WalkForwardChronosPCAWrapper(
             warmup=500,
             feature_columns=["open", "high", "low", "close", "volume"],
             frame_bound=(532, len(df)),
+            solver="svd",
+            expanding_warmup=True,
+            compute_dtype=torch.float64,
             device_map="auto",
+            pca_device="cpu",
         )
         obs, info = env.reset()
         obs.shape  # (n_components,)
@@ -108,10 +123,14 @@ class WalkForwardChronosPCAWrapper(
         selected_indices: Sequence[int] | None = None,
         explained_variance_threshold: float = 0.99,
         standardize: bool = True,
+        solver: Literal["svd", "covariance_eigh"] = "svd",
+        expanding_warmup: bool = True,
+        compute_dtype: torch.dtype = torch.float64,
         progress_bar: bool = False,
         model_name: str = "amazon/chronos-2",
         pooling: str = "mean",
-        device_map: str = "auto",
+        device_map: str | torch.device = "auto",
+        pca_device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         gym.utils.RecordConstructorArgs.__init__(
@@ -135,10 +154,14 @@ class WalkForwardChronosPCAWrapper(
             ),
             explained_variance_threshold=explained_variance_threshold,
             standardize=standardize,
+            solver=solver,
+            expanding_warmup=expanding_warmup,
+            compute_dtype=compute_dtype,
             progress_bar=progress_bar,
             model_name=model_name,
             pooling=pooling,
             device_map=device_map,
+            pca_device=str(pca_device) if pca_device is not None else None,
             dtype=dtype,
         )
         super().__init__(env)
@@ -206,9 +229,14 @@ class WalkForwardChronosPCAWrapper(
                 )
 
         self.standardize = bool(standardize)
+        self.solver = _validate_solver(solver)
+        self.expanding_warmup = bool(expanding_warmup)
+        self.compute_dtype = _validate_compute_dtype(compute_dtype)
         self.explained_variance_threshold = float(explained_variance_threshold)
         self.progress_bar = bool(progress_bar)
-        self.pca_device = resolve_device(device_map)
+        self.pca_device = resolve_device(
+            pca_device if pca_device is not None else device_map
+        )
 
         self.embedder = ChronosEmbedder(
             model_name=model_name,
@@ -243,6 +271,8 @@ class WalkForwardChronosPCAWrapper(
         initial_state = _fit_pca(
             self._warmup_embeddings,
             standardize=self.standardize,
+            solver=self.solver,
+            compute_dtype=self.compute_dtype,
         )
         self.n_components = _select_n_components(
             initial_state.explained_variance_ratio,
@@ -350,8 +380,8 @@ class WalkForwardChronosPCAWrapper(
 
         Before projecting the newly returned raw observation, the wrapper
         appends the previously used Chronos embedding to history and refits PCA
-        on that expanding history with the fixed component count chosen at
-        initialization.
+        on either expanding or rolling history with the fixed component count
+        chosen at initialization.
 
         Args:
             action: Action to forward to the wrapped env.
@@ -369,11 +399,15 @@ class WalkForwardChronosPCAWrapper(
             )
 
         self._history_embeddings.append(self._current_embedding.clone())
+        if not self.expanding_warmup and len(self._history_embeddings) > self.warmup:
+            self._history_embeddings = self._history_embeddings[-self.warmup :]
         fit_state = _fit_pca(
             torch.stack(self._history_embeddings, dim=0),
             standardize=self.standardize,
             n_components=self.n_components,
             reference_components=self._reference_components,
+            solver=self.solver,
+            compute_dtype=self.compute_dtype,
         )
         self._reference_components = fit_state.components.clone()
         self._current_embedding = self._embed_single_observation(observation)

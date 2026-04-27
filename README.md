@@ -71,7 +71,7 @@ Chronos-2 time-series encoding supports three core APIs plus a separate walk-for
 - `ChronosExtractor` - Online embedding within policy forward pass.
 - `embed_dataframe` - Dataframe slicing and pre-embedding for offline training.
 - `ChronosEmbedder` - Low-level embedding control for custom pipelines.
-- `walkforward_pca_dataframe` - Leakage-safe expanding PCA for Chronos or generic numeric dataframes.
+- `walkforward_pca_dataframe` - Leakage-safe walk-forward PCA for Chronos or generic numeric dataframes.
 
 Features: configurable pooling (`mean` / `last`), feature selection, and automatic CUDA alignment with CPU-staged input.
 

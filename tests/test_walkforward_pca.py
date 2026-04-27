@@ -74,9 +74,29 @@ def _manual_initial_projection(
     warmup: int,
     explained_variance_threshold: float,
     standardize: bool,
+    solver: str = "svd",
 ) -> tuple[np.ndarray, int]:
     history = values[:warmup].astype(np.float64)
     target = values[warmup].astype(np.float64)
+    return _manual_projection_from_history(
+        history,
+        target,
+        explained_variance_threshold=explained_variance_threshold,
+        standardize=standardize,
+        solver=solver,
+    )
+
+
+def _manual_projection_from_history(
+    history: np.ndarray,
+    target: np.ndarray,
+    *,
+    explained_variance_threshold: float,
+    standardize: bool,
+    solver: str = "svd",
+) -> tuple[np.ndarray, int]:
+    history = history.astype(np.float64)
+    target = target.astype(np.float64)
 
     mean = history.mean(axis=0)
     history_transformed = history - mean
@@ -88,8 +108,22 @@ def _manual_initial_projection(
         history_transformed = history_transformed / safe_scale
         target_transformed = target_transformed / safe_scale
 
-    _, singular_values, vt = np.linalg.svd(history_transformed, full_matrices=False)
-    explained_variance = (singular_values**2) / max(warmup - 1, 1)
+    if solver == "svd":
+        _, singular_values, vt = np.linalg.svd(history_transformed, full_matrices=False)
+        explained_variance = (singular_values**2) / max(history.shape[0] - 1, 1)
+        components = vt
+    elif solver == "covariance_eigh":
+        covariance = (history_transformed.T @ history_transformed) / max(
+            history.shape[0] - 1,
+            1,
+        )
+        covariance = (covariance + covariance.T) * 0.5
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        explained_variance = np.clip(eigenvalues[::-1], a_min=0.0, a_max=None)
+        components = eigenvectors[:, ::-1].T
+    else:
+        raise ValueError(f"Unsupported solver for test helper: {solver!r}")
+
     total_variance = float(explained_variance.sum())
     explained_variance_ratio = explained_variance / total_variance
     n_components = int(
@@ -100,8 +134,20 @@ def _manual_initial_projection(
         )
         + 1
     )
-    components = vt[:n_components]
+    components = components[:n_components]
     return (target_transformed @ components.T).astype(np.float32), n_components
+
+
+def _align_projection_signs(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+) -> np.ndarray:
+    aligned = candidate.copy()
+    limit = min(reference.shape[1], aligned.shape[1])
+    for component_index in range(limit):
+        if np.dot(reference[:, component_index], aligned[:, component_index]) < 0.0:
+            aligned[:, component_index] *= -1.0
+    return aligned
 
 
 def test_make_walkforward_windows_builds_history_target_pairs() -> None:
@@ -259,6 +305,179 @@ def test_walkforward_pca_transformer_batching_matches_rowwise_cpu() -> None:
     np.testing.assert_allclose(batched_projected, rowwise_projected, atol=1e-5)
 
 
+def test_walkforward_pca_transformer_covariance_solver_matches_svd() -> None:
+    values = np.array(
+        [
+            [1.0, 10.0, 3.0],
+            [2.0, 11.0, 5.0],
+            [4.0, 13.0, 9.0],
+            [7.0, 16.0, 15.0],
+            [11.0, 20.0, 23.0],
+            [16.0, 25.0, 33.0],
+            [22.0, 31.0, 45.0],
+        ],
+        dtype=np.float32,
+    )
+    svd_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="svd",
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+    )
+    covariance_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="covariance_eigh",
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+    )
+
+    svd_projected = svd_transformer.walkforward_transform(values)
+    covariance_projected = covariance_transformer.walkforward_transform(values)
+    aligned_covariance = _align_projection_signs(svd_projected, covariance_projected)
+
+    assert covariance_transformer.n_components_ == svd_transformer.n_components_
+    np.testing.assert_allclose(
+        aligned_covariance,
+        svd_projected,
+        atol=1e-4,
+    )
+
+
+def test_walkforward_pca_transformer_rolling_matches_manual_projection() -> None:
+    values = np.array(
+        [
+            [1.0, 10.0, 3.0],
+            [2.0, 11.0, 5.0],
+            [4.0, 13.0, 9.0],
+            [7.0, 16.0, 15.0],
+            [11.0, 20.0, 23.0],
+            [16.0, 25.0, 33.0],
+        ],
+        dtype=np.float32,
+    )
+    transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="svd",
+        expanding_warmup=False,
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=1,
+    )
+
+    projected = transformer.walkforward_transform(values)
+    expected_first, expected_n_components = _manual_projection_from_history(
+        values[:3],
+        values[3],
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="svd",
+    )
+    expected_second, _ = _manual_projection_from_history(
+        values[1:4],
+        values[4],
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="svd",
+    )
+
+    assert transformer.n_components_ == expected_n_components
+    np.testing.assert_allclose(projected[0], expected_first, atol=1e-5)
+    np.testing.assert_allclose(projected[1], expected_second, atol=1e-5)
+
+
+def test_walkforward_pca_transformer_rolling_covariance_solver_matches_svd() -> None:
+    values = np.array(
+        [
+            [1.0, 10.0, 3.0],
+            [2.0, 11.0, 5.0],
+            [4.0, 13.0, 9.0],
+            [7.0, 16.0, 15.0],
+            [11.0, 20.0, 23.0],
+            [16.0, 25.0, 33.0],
+            [22.0, 31.0, 45.0],
+        ],
+        dtype=np.float32,
+    )
+    svd_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="svd",
+        expanding_warmup=False,
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+    )
+    covariance_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="covariance_eigh",
+        expanding_warmup=False,
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+    )
+
+    svd_projected = svd_transformer.walkforward_transform(values)
+    covariance_projected = covariance_transformer.walkforward_transform(values)
+    aligned_covariance = _align_projection_signs(svd_projected, covariance_projected)
+
+    assert covariance_transformer.n_components_ == svd_transformer.n_components_
+    np.testing.assert_allclose(
+        aligned_covariance,
+        svd_projected,
+        atol=1e-4,
+    )
+
+
+def test_walkforward_pca_transformer_float32_compute_matches_float64() -> None:
+    values = np.array(
+        [
+            [1.0, 10.0, 3.0],
+            [2.0, 11.0, 5.0],
+            [4.0, 13.0, 9.0],
+            [7.0, 16.0, 15.0],
+            [11.0, 20.0, 23.0],
+            [16.0, 25.0, 33.0],
+            [22.0, 31.0, 45.0],
+        ],
+        dtype=np.float32,
+    )
+    float64_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="covariance_eigh",
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+    )
+    float32_transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        standardize=True,
+        solver="covariance_eigh",
+        compute_dtype=torch.float32,
+        device="cpu",
+        batch_size=2,
+    )
+
+    projected64 = float64_transformer.walkforward_transform(values)
+    projected32 = float32_transformer.walkforward_transform(values)
+    aligned32 = _align_projection_signs(projected64, projected32)
+
+    np.testing.assert_allclose(aligned32, projected64, atol=1e-4)
+
+
 def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
     df = _make_pca_dataframe()
 
@@ -308,6 +527,77 @@ def test_walkforward_pca_dataframe_batching_matches_rowwise_cpu() -> None:
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        device="cpu",
+        batch_size=3,
+        trim_warmup=True,
+    )
+
+    np.testing.assert_allclose(
+        batched.filter(like="pca_").to_numpy(dtype=np.float32),
+        rowwise.filter(like="pca_").to_numpy(dtype=np.float32),
+        atol=1e-5,
+    )
+
+
+def test_walkforward_pca_dataframe_covariance_solver_matches_svd() -> None:
+    df = _make_pca_dataframe()
+
+    svd_result = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        solver="svd",
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+        trim_warmup=True,
+    )
+    covariance_result = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        solver="covariance_eigh",
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+        trim_warmup=True,
+    )
+
+    np.testing.assert_allclose(
+        _align_projection_signs(
+            svd_result.filter(like="pca_").to_numpy(dtype=np.float32),
+            covariance_result.filter(like="pca_").to_numpy(dtype=np.float32),
+        ),
+        svd_result.filter(like="pca_").to_numpy(dtype=np.float32),
+        atol=1e-4,
+    )
+
+
+def test_walkforward_pca_dataframe_rolling_matches_rowwise_cpu() -> None:
+    df = _make_pca_dataframe()
+
+    rowwise = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        solver="svd",
+        expanding_warmup=False,
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=1,
+        trim_warmup=True,
+    )
+    batched = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=3,
+        standardize=True,
+        solver="svd",
+        expanding_warmup=False,
+        compute_dtype=torch.float64,
         device="cpu",
         batch_size=3,
         trim_warmup=True,
@@ -464,8 +754,19 @@ def test_walkforward_pca_transformer_auto_resolves_to_cpu_when_cuda_unavailable(
     assert transformer.device.type == "cpu"
 
 
+@pytest.mark.parametrize(
+    ("solver", "expanding_warmup"),
+    [
+        ("svd", True),
+        ("svd", False),
+        ("covariance_eigh", True),
+        ("covariance_eigh", False),
+    ],
+)
 def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
     fake_chronos,
+    solver: str,
+    expanding_warmup: bool,
 ) -> None:
     df = _make_pca_dataframe()
     lookback = 3
@@ -487,6 +788,9 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         warmup=warmup,
         explained_variance_threshold=0.99,
         standardize=True,
+        solver=solver,
+        expanding_warmup=expanding_warmup,
+        compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
         output_prefix="pca_",
@@ -507,6 +811,9 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         warmup=warmup,
         feature_columns=feature_columns,
         selected_columns=["Close", "Volume"],
+        solver=solver,
+        expanding_warmup=expanding_warmup,
+        compute_dtype=torch.float64,
         device_map="cpu",
     )
 
@@ -665,6 +972,7 @@ def test_walkforward_chronos_pca_wrapper_requests_tensor_embeddings_on_cpu(
         feature_columns=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cpu",
+        pca_device="cpu",
     )
 
     wrapped.reset()
@@ -678,7 +986,47 @@ def test_walkforward_chronos_pca_wrapper_requests_tensor_embeddings_on_cpu(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_walkforward_pca_transformer_cuda_matches_cpu() -> None:
+def test_walkforward_chronos_pca_wrapper_supports_split_devices(
+    fake_chronos,
+    monkeypatch,
+) -> None:
+    recorded: list[tuple[bool | None, torch.device | str | None]] = []
+    original_embed_windows = ChronosEmbedder.embed_windows
+
+    def _patched_embed_windows(self, *args, **kwargs):
+        recorded.append((kwargs.get("as_tensor"), kwargs.get("output_device")))
+        return original_embed_windows(self, *args, **kwargs)
+
+    monkeypatch.setattr(ChronosEmbedder, "embed_windows", _patched_embed_windows)
+
+    df = _make_pca_dataframe()
+    env = _SequentialWindowEnv(
+        df=df,
+        feature_columns=["Open", "Close", "Volume"],
+        window_size=3,
+        frame_bound=(6, len(df)),
+    )
+    wrapped = WalkForwardChronosPCAWrapper(
+        env,
+        lookback=3,
+        warmup=3,
+        feature_columns=["Open", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+        device_map="cuda",
+        pca_device="cpu",
+    )
+
+    wrapped.reset()
+
+    assert recorded[0][0] is True
+    assert torch.device(recorded[0][1]).type == "cpu"
+    assert recorded[1][0] is True
+    assert torch.device(recorded[1][1]).type == "cpu"
+
+
+@pytest.mark.parametrize("solver", ["svd", "covariance_eigh"])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_walkforward_pca_transformer_cuda_matches_cpu(solver: str) -> None:
     values = np.array(
         [
             [1.0, 10.0, 3.0],
@@ -695,6 +1043,8 @@ def test_walkforward_pca_transformer_cuda_matches_cpu() -> None:
         warmup=3,
         explained_variance_threshold=0.95,
         standardize=True,
+        solver=solver,
+        compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
     )
@@ -702,18 +1052,22 @@ def test_walkforward_pca_transformer_cuda_matches_cpu() -> None:
         warmup=3,
         explained_variance_threshold=0.95,
         standardize=True,
+        solver=solver,
+        compute_dtype=torch.float64,
         device="cuda",
         batch_size=2,
     )
 
     cpu_projected = cpu_transformer.walkforward_transform(values)
     cuda_projected = cuda_transformer.walkforward_transform(values)
+    aligned_cuda = _align_projection_signs(cpu_projected, cuda_projected)
 
-    np.testing.assert_allclose(cuda_projected, cpu_projected, atol=1e-5)
+    np.testing.assert_allclose(aligned_cuda, cpu_projected, atol=1e-5)
 
 
+@pytest.mark.parametrize("solver", ["svd", "covariance_eigh"])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_walkforward_pca_dataframe_cuda_matches_cpu() -> None:
+def test_walkforward_pca_dataframe_cuda_matches_cpu(solver: str) -> None:
     df = _make_pca_dataframe()
 
     cpu_result = walkforward_pca_dataframe(
@@ -721,6 +1075,8 @@ def test_walkforward_pca_dataframe_cuda_matches_cpu() -> None:
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        solver=solver,
+        compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
         trim_warmup=True,
@@ -730,21 +1086,28 @@ def test_walkforward_pca_dataframe_cuda_matches_cpu() -> None:
         feature_columns=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
+        solver=solver,
+        compute_dtype=torch.float64,
         device="cuda",
         batch_size=2,
         trim_warmup=True,
     )
 
     np.testing.assert_allclose(
-        cuda_result.filter(like="pca_").to_numpy(dtype=np.float32),
+        _align_projection_signs(
+            cpu_result.filter(like="pca_").to_numpy(dtype=np.float32),
+            cuda_result.filter(like="pca_").to_numpy(dtype=np.float32),
+        ),
         cpu_result.filter(like="pca_").to_numpy(dtype=np.float32),
         atol=1e-5,
     )
 
 
+@pytest.mark.parametrize("solver", ["svd", "covariance_eigh"])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_walkforward_chronos_pca_wrapper_cuda_returns_numpy_observations(
     fake_chronos,
+    solver: str,
 ) -> None:
     df = _make_pca_dataframe()
     lookback = 3
@@ -762,6 +1125,8 @@ def test_walkforward_chronos_pca_wrapper_cuda_returns_numpy_observations(
         warmup=warmup,
         feature_columns=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
+        solver=solver,
+        compute_dtype=torch.float64,
         device_map="cuda",
     )
 

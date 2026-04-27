@@ -1,42 +1,125 @@
 # Walk-Forward PCA Workflows
 
-This document explains how walk-forward PCA is exposed in CrossLearn, how it changes the data, and how to combine it with Chronos in both offline and constrained online workflows.
+This document explains how walk-forward PCA is exposed in CrossLearn, how it
+changes the data, and how to combine it with Chronos in both offline and
+constrained online workflows.
 
 ## What PCA Does
 
-PCA does not keep the original feature units. It rotates the data into a new coordinate system whose axes are the principal directions of variation in the fit data.
+PCA does not keep the original feature units. It rotates the data into a new
+coordinate system whose axes are the principal directions of variation in the
+fit data.
 
 - the original columns stay in their original units before PCA
 - the PCA output columns are principal-component scores, not raw measurements
-- if `standardize=True`, those scores are computed after walk-forward centering and walk-forward division by the fit-window standard deviation
-- if `standardize=False`, the data is still centered before PCA, but not scaled by standard deviation
+- if `standardize=True`, those scores are computed after walk-forward centering
+  and walk-forward division by the fit-window standard deviation
+- if `standardize=False`, the data is still centered before PCA, but not
+  scaled by standard deviation
 
-In other words, `pca_0`, `pca_1`, and so on are latent coordinates. They should be interpreted as projections onto the fitted component directions, not as renamed source columns.
+In other words, `pca_0`, `pca_1`, and so on are latent coordinates. They
+should be interpreted as projections onto the fitted component directions, not
+as renamed source columns.
 
 ## Why Full-Sample PCA Leaks in Time Series
 
-If PCA is fit on the entire dataset first and then used everywhere, the projection for early timestamps already contains information from future rows. That is leakage.
+If PCA is fit on the entire dataset first and then used everywhere, the
+projection for early timestamps already contains information from future rows.
+That is leakage.
 
-CrossLearn avoids that by using an expanding walk-forward procedure:
+CrossLearn avoids that by using a walk-forward procedure:
 
 1. fit the initial PCA on the first `warmup` rows
-2. choose the smallest fixed `n_components` whose cumulative explained variance reaches `explained_variance_threshold`
+2. choose the smallest fixed `n_components` whose cumulative explained variance
+   reaches `explained_variance_threshold`
 3. transform row `warmup` using only the PCA fit from rows `0 .. warmup - 1`
-4. refit the mean, optional standard deviation, and PCA loadings on rows `0 .. t - 1`
-5. transform row `t`
+4. refit the mean, optional standard deviation, and PCA loadings on the chosen
+   history window
+5. transform the next row
 6. repeat until the end
 
-The component count stays fixed after the initial warmup fit, but the scaling statistics and loadings are recomputed walk-forward at every step.
+The component count stays fixed after the initial warmup fit, but the scaling
+statistics and loadings are recomputed at every step using past rows only.
 
-## GPU Acceleration
+## Solvers and History Windows
+
+CrossLearn exposes two exact PCA backends:
+
+- `solver="svd"`:
+  direct singular-value decomposition of the transformed history matrix
+- `solver="covariance_eigh"`:
+  eigendecomposition of the covariance or correlation matrix derived from the
+  same history matrix
+
+CrossLearn also exposes two history policies through `expanding_warmup`:
+
+- `expanding_warmup=True`:
+  fit PCA on all available past rows after warmup
+- `expanding_warmup=False`:
+  fit PCA on exactly the last `warmup` rows before each next-row projection
+
+These two knobs are independent. For example:
+
+- `solver="svd", expanding_warmup=True` is the default expanding SVD workflow
+- `solver="svd", expanding_warmup=False` is rolling-window SVD
+- `solver="covariance_eigh", expanding_warmup=True` is expanding covariance PCA
+- `solver="covariance_eigh", expanding_warmup=False` is rolling covariance PCA
+
+## Why `covariance_eigh` Uses a Square Matrix Without Padding
+
+The covariance solver does not pad the history matrix.
+
+If the centered or standardized history matrix is:
+
+```text
+X shape = (n_samples, n_features)
+```
+
+then the covariance-like matrix used by the eigendecomposition path is:
+
+```text
+X^T X / (n_samples - 1)
+```
+
+and that matrix always has shape:
+
+```text
+(n_features, n_features)
+```
+
+So it is square by construction. No zero-padding is needed.
+
+## Precision Tradeoffs: `svd` vs `covariance_eigh`
+
+In exact arithmetic, `svd` and `covariance_eigh` recover the same PCA subspace.
+In floating-point arithmetic, they are close but not bit-identical.
+
+Reference behavior:
+
+- `svd` is the more numerically stable path
+- `covariance_eigh` is usually closer to the same answer on well-conditioned
+  problems, but it is more sensitive to conditioning
+- component signs may differ even when the underlying subspace is the same
+- near-tied components may rotate within the same subspace
+
+This difference is more noticeable when:
+
+- the data is poorly conditioned
+- trailing components are very small
+- `compute_dtype=torch.float32` is used
+
+`compute_dtype=torch.float64` remains the default because it is the closest
+match to the current stable behavior.
+
+## Performance Considerations
 
 Chronos embedding and walk-forward PCA behave differently from a hardware point
 of view:
 
 - `embed_dataframe(...)` can batch many windows together, so GPU utilization is
   naturally high when Chronos runs on CUDA
-- walk-forward PCA is still sequential by design, because each step must refit
-  on past rows only
+- walk-forward PCA is still chronological by design, because each step must
+  refit on past rows only
 
 CrossLearn still uses CUDA when available for the heavy PCA math inside each
 offline batch or online step:
@@ -45,17 +128,91 @@ offline batch or online step:
 - `walkforward_pca_dataframe(..., device="auto")`
 - `WalkForwardChronosPCAWrapper(..., device_map="auto")`
 
-That means the SVD, centering, scaling, and projection work can run on GPU even
-though the chronology itself remains sequential.
+That means the decomposition, centering, scaling, and projection work can run
+on GPU even though the chronology itself remains sequential.
 
-For the offline helpers, CrossLearn prepares the walk-forward prefix windows
-ahead of time and processes them in batches:
+### When CPU Can Be Faster
 
-- `WalkForwardPCATransformer(..., batch_size=256)`
-- `walkforward_pca_dataframe(..., batch_size=256)`
+It is normal for this PCA path to run slower on GPU than on CPU for some
+workloads.
 
-The online wrapper does not do this. It remains one new embedding and one new
-projection at a time by design.
+Common reasons:
+
+- the heavy operation is repeated exact decomposition, not one large GEMM
+- `compute_dtype=torch.float64` is the default
+- many consumer GPUs have weak `float64` throughput
+- smaller history windows or smaller feature counts may not amortize GPU
+  overhead well
+- `batch_size` may need to stay small for memory reasons
+
+### When GPU Is More Likely to Help
+
+GPU utilization is more likely to improve when:
+
+- `solver="covariance_eigh"` is acceptable for the workload
+- `expanding_warmup=False` gives a fixed history height of `warmup`
+- `compute_dtype=torch.float32` is acceptable for the workload
+- `batch_size` is large enough to keep the device busy without exceeding
+  available memory
+- feature width is large enough for the decomposition to dominate transfer and
+  launch overhead
+
+These are tendencies, not guarantees. The best-performing configuration is
+workload- and hardware-dependent.
+
+## Memory and `batch_size`
+
+`batch_size` controls how many chronological PCA windows are processed together
+in the offline helper path.
+
+For the SVD backend with expanding history, the dominant tensor is typically
+shaped like:
+
+```text
+(batch_size, max_history_in_chunk, n_features)
+```
+
+For the covariance backend, the dominant tensor is typically shaped like:
+
+```text
+(batch_size, n_features, n_features)
+```
+
+Both can be large, especially in `float64`. The easiest safety knob is usually
+`batch_size`.
+
+Implications:
+
+- smaller `batch_size` lowers RAM or VRAM pressure
+- larger `batch_size` can improve throughput if memory allows it
+- late chunks in expanding mode are often the heaviest, because the history
+  window has grown the most
+
+If a CPU or GPU memory allocation fails, lowering `batch_size` is the first
+thing to try.
+
+## Maximizing GPU Utilization
+
+The following settings are usually the most relevant GPU-utilization levers:
+
+- `solver="covariance_eigh"`:
+  the decomposition is applied to a square `(n_features, n_features)` matrix
+- `expanding_warmup=False`:
+  every refit uses the same history length `warmup`
+- `compute_dtype=torch.float32`:
+  often much faster on consumer GPUs than `float64`
+- larger `batch_size`:
+  useful when memory allows it
+
+Practical reference points:
+
+- if Chronos benefits from GPU but PCA does not, use GPU for Chronos and CPU
+  for PCA
+- the offline workflow already supports that split through
+  `embed_dataframe(..., device_map="auto")` followed by
+  `walkforward_pca_dataframe(..., device="cpu")`
+- the online wrapper supports the same idea through `device_map` for Chronos
+  and `pca_device` for PCA
 
 ## Core APIs
 
@@ -64,12 +221,17 @@ projection at a time by design.
 Use this class when you want direct array-level control.
 
 ```python
+import torch
+
 from crosslearn.extractors import WalkForwardPCATransformer
 
 transformer = WalkForwardPCATransformer(
     warmup=500,
     explained_variance_threshold=0.99,
     standardize=True,
+    solver="svd",
+    expanding_warmup=True,
+    compute_dtype=torch.float64,
     device="auto",
     batch_size=256,
 )
@@ -83,17 +245,22 @@ Behavior:
 - `warmup` must be at least `2`
 - `n_components_` is chosen once from the initial warmup fit
 - `standardize=True` recomputes mean and standard deviation walk-forward
-- `standardize=False` still recomputes the mean walk-forward, but skips division by standard deviation
-- `device="auto"` prefers CUDA when available
-- `batch_size` controls how many prepared walk-forward prefix windows are
-  processed per offline batched SVD call
-- component signs are aligned against the previous fit to reduce arbitrary sign flips
+- `standardize=False` still recomputes the mean walk-forward, but skips
+  division by standard deviation
+- `solver="svd"` is the default stable path
+- `solver="covariance_eigh"` uses a square covariance or correlation matrix
+- `expanding_warmup=False` means rolling PCA on exactly the last `warmup` rows
+- `compute_dtype=torch.float32` is the faster but less stable option
+- `batch_size` controls how many chronological PCA windows are processed per
+  offline chunk
 
 ### `walkforward_pca_dataframe`
 
 Use this helper when your data already lives in a dataframe.
 
 ```python
+import torch
+
 from crosslearn.extractors import walkforward_pca_dataframe
 
 pca_df = walkforward_pca_dataframe(
@@ -102,8 +269,11 @@ pca_df = walkforward_pca_dataframe(
     warmup=500,
     explained_variance_threshold=0.99,
     standardize=True,
+    solver="covariance_eigh",
+    expanding_warmup=False,
+    compute_dtype=torch.float32,
     device="auto",
-    batch_size=256,
+    batch_size=128,
     output_prefix="pca_",
     drop_feature_columns=False,
     trim_warmup=False,
@@ -114,15 +284,16 @@ pca_df = walkforward_pca_dataframe(
 Key arguments:
 
 - `feature_columns`: source columns to reduce
-- `warmup`: number of rows required before the first PCA-transformed row is available
-- `standardize`: when `True`, mean and standard deviation are both fit walk-forward
-- `device`: torch device for PCA math; `"auto"` prefers CUDA when available
+- `warmup`: number of rows required before the first PCA-transformed row is
+  available
+- `solver`: `svd` or `covariance_eigh`
+- `expanding_warmup`: expanding history vs rolling history
+- `compute_dtype`: internal PCA precision
+- `device`: torch device for PCA math
 - `batch_size`: number of chronological PCA windows processed together in the
-  offline batched path
-- `drop_feature_columns`: drops only the columns named in `feature_columns`
-- `trim_warmup`: drops the first `warmup` rows instead of leaving `NaN` in the PCA columns
-- `progress_bar`: shows a `tqdm` progress bar for the walk-forward PCA pass;
-  the total is still measured in rows, but updates happen chunk by chunk
+  offline path
+- `trim_warmup`: drops the first `warmup` rows instead of leaving `NaN` in the
+  PCA columns
 
 ## Offline Chronos + PCA
 
@@ -132,6 +303,8 @@ Chronos and PCA are intentionally separate steps:
 2. run walk-forward PCA on the resulting `chronos_*` columns
 
 ```python
+import torch
+
 from crosslearn.extractors import embed_dataframe, walkforward_pca_dataframe
 
 embedded_df = embed_dataframe(
@@ -149,8 +322,11 @@ pca_df = walkforward_pca_dataframe(
     warmup=500,
     explained_variance_threshold=0.99,
     standardize=True,
-    device="auto",
-    batch_size=256,
+    solver="svd",
+    expanding_warmup=True,
+    compute_dtype=torch.float64,
+    device="cpu",
+    batch_size=64,
     output_prefix="pca_",
     drop_feature_columns=True,
     trim_warmup=True,
@@ -158,17 +334,25 @@ pca_df = walkforward_pca_dataframe(
 )
 ```
 
-This gives you a new dataframe whose PCA columns are leakage-safe by construction. The dataset becomes shorter by `warmup` rows because the first PCA-transformed row is only available after the initial fit window.
+This gives you a new dataframe whose PCA columns are leakage-safe by
+construction. The dataset becomes shorter by `warmup` rows because the first
+PCA-transformed row is only available after the initial fit window.
 
 ## Constrained Online Chronos + PCA
 
 Adaptive PCA is not built into `ChronosExtractor`.
 
-That is intentional. In CrossLearn, the extractor is used both during rollout collection and again during policy updates on stored observations. A mutable extractor would allow the same observation to map to different features depending on call order.
+That is intentional. In CrossLearn, the extractor is used both during rollout
+collection and again during policy updates on stored observations. A mutable
+extractor would allow the same observation to map to different features
+depending on call order.
 
-Use `WalkForwardChronosPCAWrapper` instead when the environment is sequential and observation history is determined by time index:
+Use `WalkForwardChronosPCAWrapper` instead when the environment is sequential
+and observation history is determined by time index:
 
 ```python
+import torch
+
 from crosslearn.envs import WalkForwardChronosPCAWrapper
 
 wrapped_env = WalkForwardChronosPCAWrapper(
@@ -177,7 +361,11 @@ wrapped_env = WalkForwardChronosPCAWrapper(
     warmup=500,
     feature_columns=["Open", "High", "Low", "Close", "Volume"],
     selected_columns=["Close", "Volume"],
+    solver="covariance_eigh",
+    expanding_warmup=False,
+    compute_dtype=torch.float32,
     device_map="auto",
+    pca_device="cpu",
 )
 ```
 
@@ -187,29 +375,31 @@ Important constraint:
 - the first agent-visible observation is the next one after that skipped prefix
 - `frame_bound[0]` must therefore be at least `lookback + warmup`
 - `frame_bound[1]` must be greater than `frame_bound[0]`
-- for a plain dataset with no extra slicing, that means you need at least `lookback + warmup + 1` rows to get one projected observation
+- for a plain dataset with no extra slicing, that means you need at least
+  `lookback + warmup + 1` rows to get one projected observation
 
 Runtime behavior:
 
-- at wrapper construction, CrossLearn embeds only the warmup windows needed to determine the fixed PCA width
-- at `reset()`, it embeds the current raw window and projects it with the PCA fit from the warmup embedding history
-- at each `step()`, it appends the previously used embedding to the PCA history, refits PCA on that expanding history, embeds only the newly returned raw window, and projects only that new embedding
+- at wrapper construction, CrossLearn embeds only the warmup windows needed to
+  determine the fixed PCA width
+- at `reset()`, it embeds the current raw window and projects it with the PCA
+  fit from the warmup embedding history
+- at each `step()`, it appends the previously used embedding to the PCA history,
+  refits PCA on either expanding or rolling history, embeds only the newly
+  returned raw window, and projects only that new embedding
 
 This online path deliberately does not prepare future PCA windows in batches.
 That batching optimization is reserved for the offline PCA helpers, where the
 full chronological matrix is already available.
 
-`device_map` controls both Chronos embedding placement and the internal PCA
-math in the wrapper. With `device_map="auto"`, CrossLearn prefers CUDA when it
-is available.
-
-That means the first observation returned to the agent is the first post-skip observation, already PCA-ready, and every later observation is computed online from one newly embedded raw window plus an expanding PCA history that only contains past embeddings.
-
 ## Choosing `standardize=True`
 
 `standardize=True` is the default because PCA is sensitive to feature scale.
 
-With Chronos embeddings this matters less than with raw OHLCV or mixed engineered features, but the same rule applies: if some columns vary much more than others, PCA without standardization will preferentially align with those larger-scale dimensions.
+With Chronos embeddings this matters less than with raw OHLCV or mixed
+engineered features, but the same rule applies: if some columns vary much more
+than others, PCA without standardization will preferentially align with those
+larger-scale dimensions.
 
 When `standardize=True`, CrossLearn recomputes all three pieces walk-forward:
 
@@ -223,4 +413,5 @@ No future row is used when transforming the current row.
 
 - [Chronos guide](./chronos.md)
 - `ChronosExtractor` for online embedding without adaptive PCA
-- `ChronosEmbedder.transform_dataframe(...)` for lower-level aligned embedding augmentation
+- `ChronosEmbedder.transform_dataframe(...)` for lower-level aligned embedding
+  augmentation

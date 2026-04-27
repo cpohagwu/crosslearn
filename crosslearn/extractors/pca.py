@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import torch
@@ -11,6 +11,8 @@ import torch
 from crosslearn._devices import resolve_device
 
 _PCA_BATCH_SIZE = 256
+_PCA_SOLVERS = ("svd", "covariance_eigh")
+_PCA_COMPUTE_DTYPES = (torch.float32, torch.float64)
 
 
 @dataclass
@@ -19,6 +21,14 @@ class _PCAFitState:
     scale: torch.Tensor
     components: torch.Tensor
     explained_variance_ratio: torch.Tensor
+
+
+@dataclass
+class _RunningStatisticsState:
+    start: int
+    stop: int
+    sum_x: torch.Tensor
+    sum_xx: torch.Tensor
 
 
 def _make_dataframe_progress_bar(total_rows: int) -> Any:
@@ -37,6 +47,22 @@ def _make_dataframe_progress_bar(total_rows: int) -> Any:
         desc="Walk-forward PCA",
         dynamic_ncols=True,
     )
+
+
+def _validate_solver(solver: str) -> Literal["svd", "covariance_eigh"]:
+    if solver not in _PCA_SOLVERS:
+        raise ValueError(
+            f"solver must be one of {_PCA_SOLVERS}, got {solver!r}."
+        )
+    return solver
+
+
+def _validate_compute_dtype(dtype: torch.dtype) -> torch.dtype:
+    if dtype not in _PCA_COMPUTE_DTYPES:
+        raise ValueError(
+            "compute_dtype must be torch.float32 or torch.float64."
+        )
+    return dtype
 
 
 def _as_2d_float_tensor(
@@ -95,154 +121,28 @@ def _select_n_components(
     return min(selected, int(explained_variance_ratio.shape[0]))
 
 
-def _fit_pca(
-    history: torch.Tensor | np.ndarray,
-    *,
-    standardize: bool,
-    n_components: int | None = None,
-    reference_components: torch.Tensor | np.ndarray | None = None,
-) -> _PCAFitState:
-    if not isinstance(history, torch.Tensor):
-        history = _as_2d_float_tensor(
-            history,
-            device=torch.device("cpu"),
-            dtype=torch.float32,
+def _align_component_signs(
+    components: torch.Tensor,
+    reference_components: torch.Tensor | np.ndarray,
+) -> torch.Tensor:
+    if not isinstance(reference_components, torch.Tensor):
+        reference_components = torch.as_tensor(
+            reference_components,
+            device=components.device,
+            dtype=components.dtype,
+        )
+    else:
+        reference_components = reference_components.to(
+            device=components.device,
+            dtype=components.dtype,
         )
 
-    history_f64 = history.to(dtype=torch.float64)
-    mean = history_f64.mean(dim=0)
-    transformed_history = history_f64 - mean
-
-    if standardize:
-        raw_scale = torch.std(history_f64, dim=0, unbiased=False)
-        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
-        transformed_history = transformed_history / scale
-    else:
-        scale = torch.ones(history.shape[1], dtype=torch.float64, device=history.device)
-
-    _, singular_values, vt = torch.linalg.svd(transformed_history, full_matrices=False)
-    variance_denom = max(int(history.shape[0]) - 1, 1)
-    explained_variance = (singular_values**2) / variance_denom
-    total_variance = float(explained_variance.sum().item())
-    if total_variance > 0.0:
-        explained_variance_ratio = explained_variance / total_variance
-    else:
-        explained_variance_ratio = torch.zeros_like(explained_variance)
-
-    if n_components is None:
-        n_components = int(vt.shape[0])
-    components = vt[:n_components].clone()
-
-    if reference_components is not None:
-        if not isinstance(reference_components, torch.Tensor):
-            reference_components = torch.as_tensor(
-                reference_components,
-                device=components.device,
-                dtype=components.dtype,
-            )
-        else:
-            reference_components = reference_components.to(
-                device=components.device,
-                dtype=components.dtype,
-            )
-        limit = min(int(reference_components.shape[0]), int(components.shape[0]))
-        for index in range(limit):
-            if (
-                float(
-                    torch.dot(components[index], reference_components[index]).item()
-                )
-                < 0.0
-            ):
-                components[index] *= -1.0
-
-    return _PCAFitState(
-        mean=mean,
-        scale=scale,
-        components=components,
-        explained_variance_ratio=explained_variance_ratio,
-    )
-
-
-def _project_rows(values: torch.Tensor | np.ndarray, state: _PCAFitState) -> torch.Tensor:
-    values_f32 = _as_2d_float_tensor(
-        values,
-        device=state.mean.device,
-        dtype=torch.float32,
-    )
-    values_f64 = values_f32.to(dtype=torch.float64)
-    transformed = (values_f64 - state.mean) / state.scale
-    projected = transformed @ state.components.T
-    return projected.to(dtype=torch.float32)
-
-
-def _fit_pca_batch(
-    values_f64: torch.Tensor,
-    history_stops: torch.Tensor,
-    *,
-    standardize: bool,
-    n_components: int,
-    cumulative: torch.Tensor | None = None,
-    cumulative_sq: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if history_stops.ndim != 1:
-        raise ValueError("history_stops must be a 1D tensor.")
-    if history_stops.numel() == 0:
-        raise ValueError("history_stops must contain at least one value.")
-
-    max_history = int(history_stops[-1].item())
-    base_history = values_f64[:max_history]
-    history_lengths = history_stops.to(dtype=torch.float64)
-
-    if cumulative is None:
-        cumulative = torch.cumsum(values_f64, dim=0)
-    history_sum = cumulative[history_stops - 1]
-    mean = history_sum / history_lengths.unsqueeze(1)
-
-    if standardize:
-        if cumulative_sq is None:
-            cumulative_sq = torch.cumsum(values_f64.square(), dim=0)
-        history_sq_sum = cumulative_sq[history_stops - 1]
-        variance = history_sq_sum / history_lengths.unsqueeze(1) - mean.square()
-        variance = torch.clamp(variance, min=0.0)
-        raw_scale = torch.sqrt(variance)
-        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
-    else:
-        scale = torch.ones_like(mean)
-
-    positions = torch.arange(max_history, device=values_f64.device)
-    mask = positions.unsqueeze(0) < history_stops.unsqueeze(1)
-    transformed_history = (
-        (base_history.unsqueeze(0) - mean.unsqueeze(1)) / scale.unsqueeze(1)
-    ) * mask.unsqueeze(-1).to(dtype=values_f64.dtype)
-
-    _, singular_values, vt = torch.linalg.svd(transformed_history, full_matrices=False)
-    explained_variance = singular_values.square()
-    total_variance = explained_variance.sum(dim=1, keepdim=True)
-    explained_variance_ratio = torch.where(
-        total_variance > 0.0,
-        explained_variance / total_variance,
-        torch.zeros_like(explained_variance),
-    )
-    components = vt[:, :n_components].clone()
-
-    return mean, scale, components, explained_variance_ratio
-
-
-def _project_rows_batch(
-    values: torch.Tensor | np.ndarray,
-    mean: torch.Tensor,
-    scale: torch.Tensor,
-    components: torch.Tensor,
-) -> torch.Tensor:
-    values_f32 = _as_2d_float_tensor(
-        values,
-        device=mean.device,
-        dtype=torch.float32,
-    )
-    values_f64 = values_f32.to(dtype=torch.float64)
-    transformed = (values_f64 - mean) / scale
-    projected = torch.einsum("bf,bkf->bk", transformed, components)
-    return projected.to(dtype=torch.float32)
+    aligned = components.clone()
+    limit = min(int(reference_components.shape[0]), int(aligned.shape[0]))
+    for index in range(limit):
+        if float(torch.dot(aligned[index], reference_components[index]).item()) < 0.0:
+            aligned[index] *= -1.0
+    return aligned
 
 
 def _align_component_signs_batch(
@@ -260,23 +160,444 @@ def _align_component_signs_batch(
         )
         flip_mask = dot_products < 0.0
         if torch.any(flip_mask):
-            aligned[index, :limit][flip_mask] *= -1.0
+            aligned_slice = aligned[index, :limit]
+            aligned[index, :limit] = torch.where(
+                flip_mask.unsqueeze(1),
+                -aligned_slice,
+                aligned_slice,
+            )
         current_reference = aligned[index].clone()
 
     return aligned, current_reference
 
 
+def _fit_pca_svd_from_history(
+    history: torch.Tensor,
+    *,
+    standardize: bool,
+    n_components: int | None = None,
+) -> _PCAFitState:
+    mean = history.mean(dim=0)
+    transformed_history = history - mean
+
+    if standardize:
+        raw_scale = torch.std(history, dim=0, unbiased=False)
+        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
+        transformed_history = transformed_history / scale
+    else:
+        scale = torch.ones(history.shape[1], dtype=history.dtype, device=history.device)
+
+    _, singular_values, vt = torch.linalg.svd(transformed_history, full_matrices=False)
+    variance_denom = max(int(history.shape[0]) - 1, 1)
+    explained_variance = singular_values.square() / variance_denom
+    total_variance = float(explained_variance.sum().item())
+    if total_variance > 0.0:
+        explained_variance_ratio = explained_variance / total_variance
+    else:
+        explained_variance_ratio = torch.zeros_like(explained_variance)
+
+    if n_components is None:
+        n_components = int(vt.shape[0])
+
+    return _PCAFitState(
+        mean=mean,
+        scale=scale,
+        components=vt[:n_components].clone(),
+        explained_variance_ratio=explained_variance_ratio,
+    )
+
+
+def _fit_pca_covariance_from_history(
+    history: torch.Tensor,
+    *,
+    standardize: bool,
+    n_components: int | None = None,
+) -> _PCAFitState:
+    mean = history.mean(dim=0)
+    centered = history - mean
+
+    if standardize:
+        raw_scale = torch.std(history, dim=0, unbiased=False)
+        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
+        transformed_history = centered / scale
+    else:
+        scale = torch.ones(history.shape[1], dtype=history.dtype, device=history.device)
+        transformed_history = centered
+
+    variance_denom = max(int(history.shape[0]) - 1, 1)
+    covariance = (transformed_history.T @ transformed_history) / variance_denom
+    covariance = (covariance + covariance.T) * 0.5
+
+    eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
+    eigenvalues = torch.clamp(eigenvalues, min=0.0)
+    eigenvalues = torch.flip(eigenvalues, dims=(0,))
+    eigenvectors = torch.flip(eigenvectors, dims=(1,))
+
+    total_variance = float(eigenvalues.sum().item())
+    if total_variance > 0.0:
+        explained_variance_ratio = eigenvalues / total_variance
+    else:
+        explained_variance_ratio = torch.zeros_like(eigenvalues)
+
+    if n_components is None:
+        n_components = int(eigenvectors.shape[1])
+
+    return _PCAFitState(
+        mean=mean,
+        scale=scale,
+        components=eigenvectors.T[:n_components].clone(),
+        explained_variance_ratio=explained_variance_ratio,
+    )
+
+
+def _fit_pca(
+    history: torch.Tensor | np.ndarray,
+    *,
+    standardize: bool,
+    n_components: int | None = None,
+    reference_components: torch.Tensor | np.ndarray | None = None,
+    solver: Literal["svd", "covariance_eigh"] = "svd",
+    compute_dtype: torch.dtype = torch.float64,
+) -> _PCAFitState:
+    resolved_solver = _validate_solver(solver)
+    resolved_compute_dtype = _validate_compute_dtype(compute_dtype)
+
+    if not isinstance(history, torch.Tensor):
+        history = _as_2d_float_tensor(
+            history,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+    history_compute = history.to(dtype=resolved_compute_dtype)
+    if resolved_solver == "svd":
+        fit_state = _fit_pca_svd_from_history(
+            history_compute,
+            standardize=standardize,
+            n_components=n_components,
+        )
+    else:
+        fit_state = _fit_pca_covariance_from_history(
+            history_compute,
+            standardize=standardize,
+            n_components=n_components,
+        )
+
+    if reference_components is not None:
+        fit_state = _PCAFitState(
+            mean=fit_state.mean,
+            scale=fit_state.scale,
+            components=_align_component_signs(
+                fit_state.components,
+                reference_components,
+            ),
+            explained_variance_ratio=fit_state.explained_variance_ratio,
+        )
+
+    return fit_state
+
+
+def _project_rows(values: torch.Tensor | np.ndarray, state: _PCAFitState) -> torch.Tensor:
+    values_f32 = _as_2d_float_tensor(
+        values,
+        device=state.mean.device,
+        dtype=torch.float32,
+    )
+    values_compute = values_f32.to(dtype=state.mean.dtype)
+    transformed = (values_compute - state.mean) / state.scale
+    projected = transformed @ state.components.T
+    return projected.to(dtype=torch.float32)
+
+
+def _project_rows_batch(
+    values: torch.Tensor | np.ndarray,
+    mean: torch.Tensor,
+    scale: torch.Tensor,
+    components: torch.Tensor,
+) -> torch.Tensor:
+    values_f32 = _as_2d_float_tensor(
+        values,
+        device=mean.device,
+        dtype=torch.float32,
+    )
+    values_compute = values_f32.to(dtype=mean.dtype)
+    transformed = (values_compute - mean) / scale
+    projected = torch.einsum("bf,bkf->bk", transformed, components)
+    return projected.to(dtype=torch.float32)
+
+
+def _fit_pca_batch_svd_expanding(
+    values_compute: torch.Tensor,
+    history_stops: torch.Tensor,
+    *,
+    standardize: bool,
+    n_components: int,
+    cumulative: torch.Tensor | None = None,
+    cumulative_sq: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if history_stops.ndim != 1:
+        raise ValueError("history_stops must be a 1D tensor.")
+    if history_stops.numel() == 0:
+        raise ValueError("history_stops must contain at least one value.")
+
+    max_history = int(history_stops[-1].item())
+    base_history = values_compute[:max_history]
+    history_lengths = history_stops.to(dtype=values_compute.dtype)
+
+    if cumulative is None:
+        cumulative = torch.cumsum(values_compute, dim=0)
+    history_sum = cumulative[history_stops - 1]
+    mean = history_sum / history_lengths.unsqueeze(1)
+
+    if standardize:
+        if cumulative_sq is None:
+            cumulative_sq = torch.cumsum(values_compute.square(), dim=0)
+        history_sq_sum = cumulative_sq[history_stops - 1]
+        variance = history_sq_sum / history_lengths.unsqueeze(1) - mean.square()
+        variance = torch.clamp(variance, min=0.0)
+        raw_scale = torch.sqrt(variance)
+        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
+    else:
+        scale = torch.ones_like(mean)
+
+    positions = torch.arange(max_history, device=values_compute.device)
+    mask = positions.unsqueeze(0) < history_stops.unsqueeze(1)
+    transformed_history = (
+        (base_history.unsqueeze(0) - mean.unsqueeze(1)) / scale.unsqueeze(1)
+    ) * mask.unsqueeze(-1).to(dtype=values_compute.dtype)
+
+    _, singular_values, vt = torch.linalg.svd(transformed_history, full_matrices=False)
+    explained_variance = singular_values.square()
+    total_variance = explained_variance.sum(dim=1, keepdim=True)
+    explained_variance_ratio = torch.where(
+        total_variance > 0.0,
+        explained_variance / total_variance,
+        torch.zeros_like(explained_variance),
+    )
+
+    return mean, scale, vt[:, :n_components].clone(), explained_variance_ratio
+
+
+def _fit_pca_batch_svd_rolling(
+    values_compute: torch.Tensor,
+    history_stops: torch.Tensor,
+    *,
+    warmup: int,
+    standardize: bool,
+    n_components: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    history_starts = history_stops - warmup
+    offsets = torch.arange(warmup, device=values_compute.device)
+    history_indices = history_starts.unsqueeze(1) + offsets.unsqueeze(0)
+    history_batch = values_compute[history_indices]
+
+    mean = history_batch.mean(dim=1)
+    transformed_history = history_batch - mean.unsqueeze(1)
+
+    if standardize:
+        raw_scale = torch.std(history_batch, dim=1, unbiased=False)
+        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
+        transformed_history = transformed_history / scale.unsqueeze(1)
+    else:
+        scale = torch.ones_like(mean)
+
+    _, singular_values, vt = torch.linalg.svd(transformed_history, full_matrices=False)
+    explained_variance = singular_values.square()
+    total_variance = explained_variance.sum(dim=1, keepdim=True)
+    explained_variance_ratio = torch.where(
+        total_variance > 0.0,
+        explained_variance / total_variance,
+        torch.zeros_like(explained_variance),
+    )
+
+    return mean, scale, vt[:, :n_components].clone(), explained_variance_ratio
+
+
+def _initialize_running_statistics(
+    values_compute: torch.Tensor,
+    *,
+    history_start: int,
+    history_stop: int,
+) -> _RunningStatisticsState:
+    history = values_compute[history_start:history_stop]
+    return _RunningStatisticsState(
+        start=history_start,
+        stop=history_stop,
+        sum_x=history.sum(dim=0),
+        sum_xx=history.T @ history,
+    )
+
+
+def _advance_running_statistics(
+    state: _RunningStatisticsState,
+    values_compute: torch.Tensor,
+    *,
+    history_start: int,
+    history_stop: int,
+) -> _RunningStatisticsState:
+    while state.stop < history_stop:
+        row = values_compute[state.stop]
+        state.sum_x = state.sum_x + row
+        state.sum_xx = state.sum_xx + torch.outer(row, row)
+        state.stop += 1
+
+    while state.start < history_start:
+        row = values_compute[state.start]
+        state.sum_x = state.sum_x - row
+        state.sum_xx = state.sum_xx - torch.outer(row, row)
+        state.start += 1
+
+    return state
+
+
+def _moments_to_mean_scale_covariance(
+    state: _RunningStatisticsState,
+    *,
+    standardize: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    history_length = state.stop - state.start
+    if history_length < 1:
+        raise ValueError("PCA history must contain at least one row.")
+
+    history_length_float = torch.tensor(
+        float(history_length),
+        dtype=state.sum_x.dtype,
+        device=state.sum_x.device,
+    )
+    mean = state.sum_x / history_length_float
+    scatter = state.sum_xx - torch.outer(state.sum_x, state.sum_x) / history_length_float
+    scatter = (scatter + scatter.T) * 0.5
+
+    variance_denom = max(history_length - 1, 1)
+    covariance = scatter / variance_denom
+
+    if standardize:
+        raw_variance = torch.diagonal(scatter) / history_length_float
+        raw_variance = torch.clamp(raw_variance, min=0.0)
+        raw_scale = torch.sqrt(raw_variance)
+        scale = torch.where(raw_scale > 0.0, raw_scale, torch.ones_like(raw_scale))
+        covariance = covariance / torch.outer(scale, scale)
+    else:
+        scale = torch.ones_like(mean)
+
+    covariance = (covariance + covariance.T) * 0.5
+    return mean, scale, covariance
+
+
+def _fit_pca_batch_covariance(
+    values_compute: torch.Tensor,
+    history_stops: torch.Tensor,
+    *,
+    warmup: int,
+    standardize: bool,
+    n_components: int,
+    expanding_warmup: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if history_stops.ndim != 1:
+        raise ValueError("history_stops must be a 1D tensor.")
+    if history_stops.numel() == 0:
+        raise ValueError("history_stops must contain at least one value.")
+
+    batch_size = int(history_stops.shape[0])
+    feature_count = int(values_compute.shape[1])
+    mean_batch = torch.empty(
+        (batch_size, feature_count),
+        device=values_compute.device,
+        dtype=values_compute.dtype,
+    )
+    scale_batch = torch.empty_like(mean_batch)
+    covariance_batch = torch.empty(
+        (batch_size, feature_count, feature_count),
+        device=values_compute.device,
+        dtype=values_compute.dtype,
+    )
+
+    first_stop = int(history_stops[0].item())
+    first_start = 0 if expanding_warmup else first_stop - warmup
+    state = _initialize_running_statistics(
+        values_compute,
+        history_start=first_start,
+        history_stop=first_stop,
+    )
+
+    for batch_index, history_stop_value in enumerate(history_stops.tolist()):
+        history_stop = int(history_stop_value)
+        history_start = 0 if expanding_warmup else history_stop - warmup
+        state = _advance_running_statistics(
+            state,
+            values_compute,
+            history_start=history_start,
+            history_stop=history_stop,
+        )
+        mean, scale, covariance = _moments_to_mean_scale_covariance(
+            state,
+            standardize=standardize,
+        )
+        mean_batch[batch_index] = mean
+        scale_batch[batch_index] = scale
+        covariance_batch[batch_index] = covariance
+
+    eigenvalues, eigenvectors = torch.linalg.eigh(covariance_batch)
+    eigenvalues = torch.clamp(eigenvalues, min=0.0)
+    eigenvalues = torch.flip(eigenvalues, dims=(1,))
+    eigenvectors = torch.flip(eigenvectors, dims=(2,))
+    total_variance = eigenvalues.sum(dim=1, keepdim=True)
+    explained_variance_ratio = torch.where(
+        total_variance > 0.0,
+        eigenvalues / total_variance,
+        torch.zeros_like(eigenvalues),
+    )
+    components = eigenvectors.transpose(1, 2)[:, :n_components].clone()
+    return mean_batch, scale_batch, components, explained_variance_ratio
+
+
+def _fit_pca_batch(
+    values_compute: torch.Tensor,
+    history_stops: torch.Tensor,
+    *,
+    warmup: int,
+    standardize: bool,
+    n_components: int,
+    solver: Literal["svd", "covariance_eigh"],
+    expanding_warmup: bool,
+    cumulative: torch.Tensor | None = None,
+    cumulative_sq: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if solver == "svd":
+        if expanding_warmup:
+            return _fit_pca_batch_svd_expanding(
+                values_compute,
+                history_stops,
+                standardize=standardize,
+                n_components=n_components,
+                cumulative=cumulative,
+                cumulative_sq=cumulative_sq,
+            )
+        return _fit_pca_batch_svd_rolling(
+            values_compute,
+            history_stops,
+            warmup=warmup,
+            standardize=standardize,
+            n_components=n_components,
+        )
+
+    return _fit_pca_batch_covariance(
+        values_compute,
+        history_stops,
+        warmup=warmup,
+        standardize=standardize,
+        n_components=n_components,
+        expanding_warmup=expanding_warmup,
+    )
+
+
 class WalkForwardPCATransformer:
-    """Expanding-window PCA with walk-forward scaling and projections.
+    """Walk-forward PCA with configurable solver, history, and precision.
 
     ``fit(...)`` determines the fixed component count from the initial warmup
     window. ``walkforward_transform(...)`` then keeps that width fixed while
-    refitting the centering, optional standardization, and PCA loadings on the
-    expanding history before projecting the next row.
-
-    This is designed for time-series-safe dimensionality reduction. When
-    ``standardize=True``, both the mean/std statistics and the PCA loadings are
-    recomputed from past rows only before each next-row projection.
+    refitting the centering, optional standardization, and PCA loadings on
+    either expanding or rolling history before projecting the next row.
 
     Args:
         warmup: Number of initial rows used to choose the fixed PCA width and to
@@ -286,17 +607,30 @@ class WalkForwardPCATransformer:
         standardize: If ``True``, center and divide by the walk-forward
             standard deviation before PCA. If ``False``, PCA is still centered
             but not variance-scaled.
+        solver: PCA backend. ``"svd"`` uses direct singular-value
+            decomposition. ``"covariance_eigh"`` decomposes the covariance or
+            correlation matrix derived from the selected history window.
+        expanding_warmup: If ``True``, fit PCA on all available past rows after
+            warmup. If ``False``, fit PCA on exactly the last ``warmup`` rows
+            before each next-row projection.
+        compute_dtype: Internal torch dtype used for PCA math. ``float64`` is
+            the default stability path, while ``float32`` is an opt-in faster
+            path that may be preferable on CUDA.
         device: Torch device for PCA math. ``"auto"`` prefers CUDA when
             available.
-        batch_size: Number of walk-forward prefix windows to batch together per
-            batched SVD call in the offline path.
+        batch_size: Number of chronological PCA windows to process per offline
+            chunk.
 
     Example::
 
         transformer = WalkForwardPCATransformer(
             warmup=500,
             explained_variance_threshold=0.99,
+            solver="svd",
+            expanding_warmup=True,
+            compute_dtype=torch.float64,
             device="auto",
+            batch_size=256,
         )
         projected = transformer.fit_transform(values)
         projected.shape  # (len(values) - 500, transformer.n_components_)
@@ -308,6 +642,9 @@ class WalkForwardPCATransformer:
         warmup: int,
         explained_variance_threshold: float = 0.99,
         standardize: bool = True,
+        solver: Literal["svd", "covariance_eigh"] = "svd",
+        expanding_warmup: bool = True,
+        compute_dtype: torch.dtype = torch.float64,
         device: str | torch.device = "auto",
         batch_size: int = _PCA_BATCH_SIZE,
     ) -> None:
@@ -323,6 +660,9 @@ class WalkForwardPCATransformer:
         self.warmup = int(warmup)
         self.explained_variance_threshold = float(explained_variance_threshold)
         self.standardize = bool(standardize)
+        self.solver = _validate_solver(solver)
+        self.expanding_warmup = bool(expanding_warmup)
+        self.compute_dtype = _validate_compute_dtype(compute_dtype)
         self.device = resolve_device(device)
         self.batch_size = int(batch_size)
 
@@ -342,15 +682,14 @@ class WalkForwardPCATransformer:
     def fit(self, values: Any) -> "WalkForwardPCATransformer":
         """Fit the initial warmup PCA state and choose a fixed output width.
 
-        Only the first ``warmup`` rows are used here. This method does not
-        perform the full walk-forward projection loop.
+        Only the first ``warmup`` rows are used here. This method does not run
+        the full walk-forward projection loop.
 
         Args:
             values: 2D array-like input of shape ``(n_rows, n_features)``.
 
         Returns:
-            ``self`` with ``n_components_``, ``mean_``, ``scale_``, and
-            ``components_`` populated from the initial warmup fit.
+            ``self`` with the initial PCA state populated.
 
         Raises:
             ValueError: If fewer than ``warmup`` rows are provided or if the
@@ -366,7 +705,12 @@ class WalkForwardPCATransformer:
                 f"Need at least warmup={self.warmup} rows, got {array.shape[0]}."
             )
 
-        initial_state = _fit_pca(array[: self.warmup], standardize=self.standardize)
+        initial_state = _fit_pca(
+            array[: self.warmup],
+            standardize=self.standardize,
+            solver=self.solver,
+            compute_dtype=self.compute_dtype,
+        )
         selected_components = _select_n_components(
             initial_state.explained_variance_ratio,
             self.explained_variance_threshold,
@@ -391,7 +735,7 @@ class WalkForwardPCATransformer:
 
         Unlike ``walkforward_transform(...)``, this method does not refit the
         PCA state as it moves through time. It simply applies the latest fitted
-        mean/scale/components to every row in ``values``.
+        mean, scale, and loadings to every row in ``values``.
 
         Args:
             values: 2D array-like input of shape ``(n_rows, n_features)``.
@@ -403,7 +747,12 @@ class WalkForwardPCATransformer:
             ValueError: If the transformer has not been fit or if the feature
                 count does not match the fitted state.
         """
-        if self._fit_state is None or self.components_ is None or self.mean_ is None or self.scale_ is None:
+        if (
+            self._fit_state is None
+            or self.components_ is None
+            or self.mean_ is None
+            or self.scale_ is None
+        ):
             raise ValueError("WalkForwardPCATransformer must be fit before transform().")
 
         array = _as_2d_float_tensor(
@@ -427,8 +776,7 @@ class WalkForwardPCATransformer:
             values: 2D array-like input of shape ``(n_rows, n_features)``.
 
         Returns:
-            A ``float32`` array of shape ``(n_rows - warmup, n_components_)``
-            containing only the chronologically valid next-row projections.
+            A ``float32`` array of shape ``(n_rows - warmup, n_components_)``.
         """
         return self.walkforward_transform(values)
 
@@ -438,14 +786,13 @@ class WalkForwardPCATransformer:
         *,
         progress_bar: bool = False,
     ) -> np.ndarray:
-        """Project each row using PCA refit on the expanding past only.
+        """Project each row using PCA refit on past rows only.
 
         The method first calls ``fit(...)`` on the initial warmup window to
         determine ``n_components_``. It then prepares chronological
         ``(history_stop, target_stop)`` windows once, processes those windows
-        in chunks of ``batch_size``, refits PCA on rows ``[:history_stop]``,
-        and projects only the corresponding next row. The output therefore
-        starts at the first chronologically valid next-row projection.
+        in chunks of ``batch_size``, refits PCA on the selected history window,
+        and projects only the corresponding next row.
 
         Args:
             values: 2D array-like input of shape ``(n_rows, n_features)`` in
@@ -475,12 +822,18 @@ class WalkForwardPCATransformer:
         if windows.size == 0:
             return np.empty((0, self.n_components_), dtype=np.float32)
 
-        values_f64 = array.to(dtype=torch.float64)
-        cumulative = torch.cumsum(values_f64, dim=0)
-        cumulative_sq = (
-            torch.cumsum(values_f64.square(), dim=0) if self.standardize else None
-        )
+        values_compute = array.to(dtype=self.compute_dtype)
         windows_t = torch.as_tensor(windows, device=self.device, dtype=torch.int64)
+
+        cumulative = None
+        cumulative_sq = None
+        if self.solver == "svd" and self.expanding_warmup:
+            cumulative = torch.cumsum(values_compute, dim=0)
+            cumulative_sq = (
+                torch.cumsum(values_compute.square(), dim=0)
+                if self.standardize
+                else None
+            )
 
         projected_rows: list[torch.Tensor] = []
         reference_components = self._fit_state.components.clone()
@@ -496,10 +849,13 @@ class WalkForwardPCATransformer:
                 target_indices = chunk[:, 1] - 1
 
                 mean, scale, components, explained_variance_ratio = _fit_pca_batch(
-                    values_f64,
+                    values_compute,
                     history_stops,
+                    warmup=self.warmup,
                     standardize=self.standardize,
                     n_components=self.n_components_,
+                    solver=self.solver,
+                    expanding_warmup=self.expanding_warmup,
                     cumulative=cumulative,
                     cumulative_sq=cumulative_sq,
                 )
@@ -541,6 +897,9 @@ def walkforward_pca_dataframe(
     warmup: int,
     explained_variance_threshold: float = 0.99,
     standardize: bool = True,
+    solver: Literal["svd", "covariance_eigh"] = "svd",
+    expanding_warmup: bool = True,
+    compute_dtype: torch.dtype = torch.float64,
     device: str | torch.device = "auto",
     batch_size: int = _PCA_BATCH_SIZE,
     output_prefix: str = "pca_",
@@ -555,9 +914,9 @@ def walkforward_pca_dataframe(
     future-safe next-row projection exists for them yet. Set
     ``trim_warmup=True`` to drop those rows and reset the index.
 
-    This function is intended to compose cleanly with ``embed_dataframe(...)``:
-    first build Chronos embeddings, then run walk-forward PCA over the
-    resulting ``chronos_*`` columns.
+    This function composes cleanly with ``embed_dataframe(...)``: first build
+    Chronos embeddings, then run walk-forward PCA over the resulting
+    ``chronos_*`` columns.
 
     Args:
         df: Source pandas dataframe in chronological order.
@@ -567,10 +926,17 @@ def walkforward_pca_dataframe(
             threshold used to choose ``n_components_``.
         standardize: If ``True``, recompute mean/std walk-forward before each
             PCA fit. If ``False``, only walk-forward centering is applied.
+        solver: PCA backend. ``"svd"`` is the direct decomposition path.
+            ``"covariance_eigh"`` solves PCA from a square covariance or
+            correlation matrix derived from each history window.
+        expanding_warmup: If ``True``, fit PCA on all available past rows after
+            warmup. If ``False``, fit PCA on exactly the last ``warmup`` rows
+            before each next-row projection.
+        compute_dtype: Internal torch dtype used for PCA math.
         device: Torch device for PCA math. ``"auto"`` prefers CUDA when
             available.
-        batch_size: Number of walk-forward prefix windows to batch together per
-            batched SVD call.
+        batch_size: Number of chronological PCA windows to process per offline
+            chunk.
         output_prefix: Prefix for appended PCA columns.
         drop_feature_columns: If ``True``, drop the original
             ``feature_columns`` after adding the PCA columns.
@@ -604,6 +970,9 @@ def walkforward_pca_dataframe(
             feature_columns=chronos_columns,
             warmup=500,
             explained_variance_threshold=0.99,
+            solver="svd",
+            expanding_warmup=True,
+            compute_dtype=torch.float64,
             device="auto",
             batch_size=256,
             trim_warmup=True,
@@ -634,6 +1003,9 @@ def walkforward_pca_dataframe(
         warmup=warmup,
         explained_variance_threshold=explained_variance_threshold,
         standardize=standardize,
+        solver=solver,
+        expanding_warmup=expanding_warmup,
+        compute_dtype=compute_dtype,
         device=device,
         batch_size=batch_size,
     )
