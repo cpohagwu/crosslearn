@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any, Literal, Sequence
 
 import numpy as np
@@ -119,6 +120,34 @@ def _select_n_components(
             np.searchsorted(cumulative, explained_variance_threshold, side="left") + 1
         )
     return min(selected, int(explained_variance_ratio.shape[0]))
+
+
+def _validate_requested_n_components(n_components: int | None) -> int | None:
+    if n_components is None:
+        return None
+    if isinstance(n_components, bool) or not isinstance(n_components, Integral):
+        raise ValueError("n_components must be a positive integer when provided.")
+    resolved = int(n_components)
+    if resolved < 1:
+        raise ValueError("n_components must be a positive integer when provided.")
+    return resolved
+
+
+def _resolve_n_components(
+    *,
+    requested_n_components: int | None,
+    threshold_n_components: int,
+    explained_variance_threshold: float,
+) -> int:
+    if requested_n_components is None:
+        return threshold_n_components
+    if requested_n_components > threshold_n_components:
+        raise ValueError(
+            f"n_components={requested_n_components} exceeds the "
+            f"{threshold_n_components} components selected by "
+            f"explained_variance_threshold={explained_variance_threshold}."
+        )
+    return requested_n_components
 
 
 def _align_component_signs(
@@ -604,6 +633,9 @@ class WalkForwardPCATransformer:
             fit the first PCA state. Must be at least ``2``.
         explained_variance_threshold: Cumulative explained-variance threshold
             used on the initial warmup fit to choose ``n_components_``.
+        n_components: Optional fixed output width. When provided, it must be a
+            positive integer less than or equal to the component count selected
+            by ``explained_variance_threshold``.
         standardize: If ``True``, center and divide by the walk-forward
             standard deviation before PCA. If ``False``, PCA is still centered
             but not variance-scaled.
@@ -641,6 +673,7 @@ class WalkForwardPCATransformer:
         *,
         warmup: int,
         explained_variance_threshold: float = 0.99,
+        n_components: int | None = None,
         standardize: bool = True,
         solver: Literal["svd", "covariance_eigh"] = "svd",
         expanding_warmup: bool = True,
@@ -659,6 +692,7 @@ class WalkForwardPCATransformer:
 
         self.warmup = int(warmup)
         self.explained_variance_threshold = float(explained_variance_threshold)
+        self.n_components = _validate_requested_n_components(n_components)
         self.standardize = bool(standardize)
         self.solver = _validate_solver(solver)
         self.expanding_warmup = bool(expanding_warmup)
@@ -668,6 +702,7 @@ class WalkForwardPCATransformer:
 
         self.n_features_in_: int | None = None
         self.n_components_: int | None = None
+        self.threshold_n_components_: int | None = None
         self.mean_: np.ndarray | None = None
         self.scale_: np.ndarray | None = None
         self.components_: np.ndarray | None = None
@@ -711,12 +746,18 @@ class WalkForwardPCATransformer:
             solver=self.solver,
             compute_dtype=self.compute_dtype,
         )
-        selected_components = _select_n_components(
+        threshold_components = _select_n_components(
             initial_state.explained_variance_ratio,
             self.explained_variance_threshold,
         )
+        selected_components = _resolve_n_components(
+            requested_n_components=self.n_components,
+            threshold_n_components=threshold_components,
+            explained_variance_threshold=self.explained_variance_threshold,
+        )
 
         self.n_features_in_ = int(array.shape[1])
+        self.threshold_n_components_ = threshold_components
         self.n_components_ = selected_components
         self._fit_state = _PCAFitState(
             mean=initial_state.mean.clone(),
@@ -896,6 +937,7 @@ def walkforward_pca_dataframe(
     feature_columns: Sequence[str],
     warmup: int,
     explained_variance_threshold: float = 0.99,
+    n_components: int | None = None,
     standardize: bool = True,
     solver: Literal["svd", "covariance_eigh"] = "svd",
     expanding_warmup: bool = True,
@@ -904,7 +946,7 @@ def walkforward_pca_dataframe(
     batch_size: int = _PCA_BATCH_SIZE,
     output_prefix: str = "pca_",
     drop_feature_columns: bool = False,
-    return_transformed_warmup: bool = False,
+    return_transformed_warmup: bool = True,
     trim_warmup: bool = True,
     progress_bar: bool = False,
 ) -> Any:
@@ -927,6 +969,9 @@ def walkforward_pca_dataframe(
         warmup: Number of initial rows used to determine the fixed PCA width.
         explained_variance_threshold: Initial cumulative explained-variance
             threshold used to choose ``n_components_``.
+        n_components: Optional fixed output width. When provided, it must be a
+            positive integer less than or equal to the component count selected
+            by ``explained_variance_threshold``.
         standardize: If ``True``, recompute mean/std walk-forward before each
             PCA fit. If ``False``, only walk-forward centering is applied.
         solver: PCA backend. ``"svd"`` is the direct decomposition path.
@@ -1011,6 +1056,7 @@ def walkforward_pca_dataframe(
     transformer = WalkForwardPCATransformer(
         warmup=warmup,
         explained_variance_threshold=explained_variance_threshold,
+        n_components=n_components,
         standardize=standardize,
         solver=solver,
         expanding_warmup=expanding_warmup,

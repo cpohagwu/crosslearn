@@ -12,9 +12,11 @@ from crosslearn.extractors.pca import (
     _PCAFitState,
     _fit_pca,
     _project_rows,
+    _resolve_n_components,
     _select_n_components,
     _to_numpy_float32,
     _validate_compute_dtype,
+    _validate_requested_n_components,
     _validate_solver,
 )
 
@@ -72,6 +74,9 @@ class WalkForwardChronosPCAWrapper(
         explained_variance_threshold: Cumulative explained-variance threshold
             used on the initial warmup PCA fit to choose the fixed component
             count.
+        n_components: Optional fixed PCA observation width. When provided, it
+            must be a positive integer less than or equal to the component
+            count selected by ``explained_variance_threshold``.
         standardize: If ``True``, recompute mean/std walk-forward alongside the
             PCA loadings. If ``False``, PCA is still centered but not
             variance-scaled.
@@ -122,6 +127,7 @@ class WalkForwardChronosPCAWrapper(
         selected_columns: Sequence[str] | None = None,
         selected_indices: Sequence[int] | None = None,
         explained_variance_threshold: float = 0.99,
+        n_components: int | None = None,
         standardize: bool = True,
         solver: Literal["svd", "covariance_eigh"] = "svd",
         expanding_warmup: bool = True,
@@ -153,6 +159,7 @@ class WalkForwardChronosPCAWrapper(
                 else None
             ),
             explained_variance_threshold=explained_variance_threshold,
+            n_components=n_components,
             standardize=standardize,
             solver=solver,
             expanding_warmup=expanding_warmup,
@@ -233,6 +240,7 @@ class WalkForwardChronosPCAWrapper(
         self.expanding_warmup = bool(expanding_warmup)
         self.compute_dtype = _validate_compute_dtype(compute_dtype)
         self.explained_variance_threshold = float(explained_variance_threshold)
+        self.requested_n_components = _validate_requested_n_components(n_components)
         self.progress_bar = bool(progress_bar)
         self.pca_device = resolve_device(
             pca_device if pca_device is not None else device_map
@@ -274,9 +282,14 @@ class WalkForwardChronosPCAWrapper(
             solver=self.solver,
             compute_dtype=self.compute_dtype,
         )
-        self.n_components = _select_n_components(
+        self.threshold_n_components = _select_n_components(
             initial_state.explained_variance_ratio,
             self.explained_variance_threshold,
+        )
+        self.n_components = _resolve_n_components(
+            requested_n_components=self.requested_n_components,
+            threshold_n_components=self.threshold_n_components,
+            explained_variance_threshold=self.explained_variance_threshold,
         )
         self._initial_fit_state = _PCAFitState(
             mean=initial_state.mean,

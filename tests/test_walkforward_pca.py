@@ -478,6 +478,118 @@ def test_walkforward_pca_transformer_float32_compute_matches_float64() -> None:
     np.testing.assert_allclose(aligned32, projected64, atol=1e-4)
 
 
+def test_walkforward_pca_transformer_n_components_can_narrow_threshold_width() -> None:
+    values = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [2.0, 1.0, 0.0],
+            [1.0, 2.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    baseline = WalkForwardPCATransformer(
+        warmup=4,
+        explained_variance_threshold=1.0,
+        standardize=False,
+        device="cpu",
+        batch_size=2,
+    )
+    narrowed = WalkForwardPCATransformer(
+        warmup=4,
+        explained_variance_threshold=1.0,
+        n_components=1,
+        standardize=False,
+        device="cpu",
+        batch_size=2,
+    )
+
+    baseline_projected = baseline.walkforward_transform(values)
+    narrowed_projected = narrowed.walkforward_transform(values)
+
+    assert narrowed.threshold_n_components_ == baseline.n_components_
+    assert narrowed.threshold_n_components_ is not None
+    assert narrowed.threshold_n_components_ > narrowed.n_components_
+    assert narrowed.n_components_ == 1
+    assert narrowed_projected.shape == (values.shape[0] - 4, 1)
+    np.testing.assert_allclose(
+        narrowed_projected,
+        baseline_projected[:, :1],
+        atol=1e-5,
+    )
+
+
+def test_walkforward_pca_transformer_n_components_equal_threshold_matches_default() -> None:
+    values = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [2.0, 1.0, 0.0],
+            [1.0, 2.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    baseline = WalkForwardPCATransformer(
+        warmup=4,
+        explained_variance_threshold=1.0,
+        standardize=False,
+        device="cpu",
+        batch_size=2,
+    )
+    baseline_projected = baseline.walkforward_transform(values)
+    assert baseline.n_components_ is not None
+
+    explicit = WalkForwardPCATransformer(
+        warmup=4,
+        explained_variance_threshold=1.0,
+        n_components=baseline.n_components_,
+        standardize=False,
+        device="cpu",
+        batch_size=2,
+    )
+    explicit_projected = explicit.walkforward_transform(values)
+
+    assert explicit.threshold_n_components_ == baseline.n_components_
+    assert explicit.n_components_ == baseline.n_components_
+    np.testing.assert_allclose(explicit_projected, baseline_projected, atol=1e-5)
+
+
+def test_walkforward_pca_transformer_n_components_above_threshold_raises() -> None:
+    values = np.array(
+        [
+            [1.0, 10.0, 3.0],
+            [2.0, 11.0, 5.0],
+            [4.0, 13.0, 9.0],
+            [7.0, 16.0, 15.0],
+        ],
+        dtype=np.float32,
+    )
+    transformer = WalkForwardPCATransformer(
+        warmup=3,
+        explained_variance_threshold=0.95,
+        n_components=999,
+        standardize=True,
+        device="cpu",
+    )
+
+    with pytest.raises(ValueError, match="n_components=999 exceeds"):
+        transformer.fit(values)
+
+
+@pytest.mark.parametrize("n_components", [0, -1])
+def test_walkforward_pca_transformer_validates_n_components(n_components: int) -> None:
+    with pytest.raises(ValueError, match="n_components must be a positive integer"):
+        WalkForwardPCATransformer(
+            warmup=3,
+            n_components=n_components,
+            device="cpu",
+        )
+
+
 def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
     df = _make_pca_dataframe()
 
@@ -541,6 +653,27 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
         trimmed_without_warmup_scores.to_numpy(dtype=np.float32),
         atol=1e-5,
     )
+
+
+def test_walkforward_pca_dataframe_n_components_controls_output_columns() -> None:
+    df = _make_pca_dataframe()
+
+    transformed = walkforward_pca_dataframe(
+        df,
+        feature_columns=["Open", "Close", "Volume"],
+        warmup=4,
+        explained_variance_threshold=1.0,
+        n_components=1,
+        standardize=False,
+        device="cpu",
+        output_prefix="pca_",
+        drop_feature_columns=True,
+        trim_warmup=True,
+    )
+
+    assert list(transformed.columns) == ["pca_0"]
+    assert len(transformed) == len(df) - 4
+    assert not transformed["pca_0"].isna().any()
 
 
 def test_walkforward_pca_dataframe_returns_initial_warmup_fit_transform() -> None:
@@ -877,7 +1010,9 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
     )
     expected_df = walkforward_pca_dataframe(
         embedded,
-        feature_columns=[column for column in embedded.columns if column.startswith("chronos_")],
+        feature_columns=[
+            column for column in embedded.columns if column.startswith("chronos_")
+        ],
         warmup=warmup,
         explained_variance_threshold=0.99,
         standardize=True,
@@ -927,6 +1062,90 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         atol=1e-5,
     )
     assert wrapped.observation_space.shape == (expected.shape[1],)
+
+
+def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
+    fake_chronos,
+) -> None:
+    df = _make_pca_dataframe()
+    lookback = 3
+    warmup = 3
+    feature_columns = ["Open", "Close", "Volume"]
+    agent_frame_bound = (lookback + warmup, len(df))
+    history_frame_bound = (agent_frame_bound[0] - warmup, agent_frame_bound[1])
+
+    embedded = embed_dataframe(
+        df,
+        lookback=lookback,
+        frame_bound=history_frame_bound,
+        feature_columns=feature_columns,
+        selected_columns=["Close", "Volume"],
+    )
+    expected_df = walkforward_pca_dataframe(
+        embedded,
+        feature_columns=[column for column in embedded.columns if column.startswith("chronos_")],
+        warmup=warmup,
+        explained_variance_threshold=0.99,
+        n_components=1,
+        standardize=True,
+        compute_dtype=torch.float64,
+        device="cpu",
+        batch_size=2,
+        output_prefix="pca_",
+        drop_feature_columns=True,
+        trim_warmup=True,
+    )
+    expected = expected_df.filter(like="pca_").to_numpy(dtype=np.float32)
+
+    env = _SequentialWindowEnv(
+        df=df,
+        feature_columns=feature_columns,
+        window_size=lookback,
+        frame_bound=agent_frame_bound,
+    )
+    wrapped = WalkForwardChronosPCAWrapper(
+        env,
+        lookback=lookback,
+        warmup=warmup,
+        feature_columns=feature_columns,
+        selected_columns=["Close", "Volume"],
+        n_components=1,
+        compute_dtype=torch.float64,
+        device_map="cpu",
+    )
+
+    obs, _ = wrapped.reset()
+
+    assert wrapped.n_components == 1
+    assert wrapped.threshold_n_components >= wrapped.n_components
+    assert wrapped.observation_space.shape == (1,)
+    assert obs.shape == (1,)
+    np.testing.assert_allclose(obs, expected[0], atol=1e-5)
+
+
+def test_walkforward_chronos_pca_wrapper_rejects_n_components_above_threshold(
+    fake_chronos,
+) -> None:
+    df = _make_pca_dataframe()
+    lookback = 3
+    warmup = 3
+    env = _SequentialWindowEnv(
+        df=df,
+        feature_columns=["Open", "Close", "Volume"],
+        window_size=lookback,
+        frame_bound=(lookback + warmup, len(df)),
+    )
+
+    with pytest.raises(ValueError, match="n_components=999 exceeds"):
+        WalkForwardChronosPCAWrapper(
+            env,
+            lookback=lookback,
+            warmup=warmup,
+            feature_columns=["Open", "Close", "Volume"],
+            selected_columns=["Close", "Volume"],
+            n_components=999,
+            device_map="cpu",
+        )
 
 
 @pytest.mark.parametrize(

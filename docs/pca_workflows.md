@@ -31,7 +31,8 @@ CrossLearn avoids that by using a walk-forward procedure:
 
 1. fit the initial PCA on the first `warmup` rows
 2. choose the smallest fixed `n_components` whose cumulative explained variance
-   reaches `explained_variance_threshold`
+   reaches `explained_variance_threshold`, unless a smaller explicit
+   `n_components` is provided
 3. transform row `warmup` using only the PCA fit from rows `0 .. warmup - 1`
 4. refit the mean, optional standard deviation, and PCA loadings on the chosen
    history window
@@ -241,6 +242,7 @@ from crosslearn.extractors import WalkForwardPCATransformer
 transformer = WalkForwardPCATransformer(
     warmup=500,
     explained_variance_threshold=0.99,
+    n_components=None,
     standardize=True,
     solver="svd",
     expanding_warmup=True,
@@ -257,6 +259,10 @@ Behavior:
 
 - `warmup` must be at least `2`
 - `n_components_` is chosen once from the initial warmup fit
+- `threshold_n_components_` records the width selected by
+  `explained_variance_threshold`
+- `n_components`, when provided, must be less than or equal to
+  `threshold_n_components_`
 - `standardize=True` recomputes mean and standard deviation walk-forward
 - `standardize=False` still recomputes the mean walk-forward, but skips
   division by standard deviation
@@ -281,6 +287,7 @@ pca_df = walkforward_pca_dataframe(
     feature_columns=["feature_a", "feature_b", "feature_c"],
     warmup=500,
     explained_variance_threshold=0.99,
+    n_components=None,
     standardize=True,
     solver="covariance_eigh",
     expanding_warmup=False,
@@ -300,6 +307,10 @@ Key arguments:
 - `feature_columns`: source columns to reduce
 - `warmup`: number of rows required before the first future-safe next-row
   projection is available
+- `explained_variance_threshold`: upper-bound component policy from the initial
+  warmup fit
+- `n_components`: optional smaller fixed width; it cannot exceed the threshold
+  selected width
 - `solver`: `svd` or `covariance_eigh`
 - `expanding_warmup`: expanding history vs rolling history
 - `compute_dtype`: internal PCA precision
@@ -381,6 +392,7 @@ wrapped_env = WalkForwardChronosPCAWrapper(
     warmup=500,
     feature_columns=["Open", "High", "Low", "Close", "Volume"],
     selected_columns=["Close", "Volume"],
+    n_components=None,
     solver="covariance_eigh",
     expanding_warmup=False,
     compute_dtype=torch.float32,
@@ -402,6 +414,8 @@ Runtime behavior:
 
 - at wrapper construction, CrossLearn embeds only the warmup windows needed to
   determine the fixed PCA width
+- if `n_components` is provided, it must be less than or equal to the width
+  selected by `explained_variance_threshold`
 - at `reset()`, it embeds the current raw window and projects it with the PCA
   fit from the warmup embedding history
 - at each `step()`, it appends the previously used embedding to the PCA history,
