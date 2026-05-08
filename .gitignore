@@ -9,6 +9,7 @@ dist/
 .pypirc
 *.bat
 .codex
+.env
 
 examples/checkpoints/
 examples/models/
