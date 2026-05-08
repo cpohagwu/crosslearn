@@ -8,6 +8,7 @@ and that a deliberately wrong Chronos variant is detected.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Type
 
 import gymnasium as gym
@@ -164,11 +165,11 @@ def _assert_policy_parity(
 
 def _make_agent(
     *,
-    env: gym.Env,
+    env_factory: Callable[[], gym.Env],
     features_extractor_class: Type[ChronosExtractor],
 ) -> REINFORCE:
     agent = REINFORCE(
-        env,
+        env_factory,
         n_envs=1,
         n_steps=4,
         features_extractor_class=features_extractor_class,
@@ -224,11 +225,11 @@ def test_chronos_render_parity_harness_matches_reference_agent(fake_chronos) -> 
     observations = _make_observation_trace().numpy()
 
     reference_agent = _make_agent(
-        env=_ReplayTradingEnv(observations),
+        env_factory=lambda: _ReplayTradingEnv(observations),
         features_extractor_class=ChronosExtractor,
     )
     candidate_agent = _make_agent(
-        env=_ReplayTradingEnv(observations),
+        env_factory=lambda: _ReplayTradingEnv(observations),
         features_extractor_class=ChronosExtractor,
     )
     candidate_agent.policy.load_state_dict(reference_agent.policy.state_dict())
@@ -249,11 +250,11 @@ def test_chronos_render_parity_harness_detects_action_drift(fake_chronos) -> Non
     observations = _make_observation_trace().numpy()
 
     reference_agent = _make_agent(
-        env=_ReplayTradingEnv(observations),
+        env_factory=lambda: _ReplayTradingEnv(observations),
         features_extractor_class=ChronosExtractor,
     )
     candidate_agent = _make_agent(
-        env=_ReplayTradingEnv(observations),
+        env_factory=lambda: _ReplayTradingEnv(observations),
         features_extractor_class=_FeaturePermutingChronosExtractor,
     )
     candidate_agent.policy.load_state_dict(reference_agent.policy.state_dict())
