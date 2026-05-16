@@ -10,6 +10,9 @@ dist/
 *.bat
 .codex
 .env
+.vscode/
+mlruns/
+test-results/
 
 examples/checkpoints/
 examples/models/

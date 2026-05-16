@@ -10,9 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
-  "torch>=2.2",
-  "gymnasium>=0.29",
-  "stable-baselines3>=2.3.0",
+  "torch>=2.0",
+  "gymnasium>=0.28.1",
+  "stable-baselines3>=2.2.1",
 ]
 keywords = ["reinforcement-learning", "stable-baselines3", "gymnasium", "chronos", "feature-extraction", "time-series"]
 classifiers = [
@@ -31,14 +31,14 @@ Issues = "https://github.com/cpohagwu/crosslearn/issues"
 
 [project.optional-dependencies]
 atari = [
-  "ale-py>=0.10",
-  "gymnasium[atari]>=0.29",
-  "gymnasium[accept-rom-license]>=0.29",
+  "ale-py>=0.8",
+  "gymnasium[atari]>=0.28.1",
+  "gymnasium[accept-rom-license]>=0.28.1",
   "gymnasium[other]",
-  "pygame>=2.5",
+  "pygame>=2.1",
 ]
 chronos = [
-  "transformers>=4.40",
+  "transformers>=4.38",
   "huggingface-hub>=0.22",
   "chronos-forecasting>=2.1.0",
   "tqdm>=4.66",
@@ -50,17 +50,9 @@ dev = [
   "build>=1.2",
 ]
 extra = [
-  "transformers>=4.40",
-  "huggingface-hub>=0.22",
-  "chronos-forecasting>=2.1.0",
-  "ale-py>=0.10",
+  "crosslearn[atari,chronos]",
   "tensorboard>=2.14",
   "wandb>=0.16",
-  "tqdm>=4.66",
-  "gymnasium[atari]>=0.29",
-  "gymnasium[accept-rom-license]>=0.29",
-  "gymnasium[other]",
-  "pygame>=2.5",
 ]
 
 [tool.setuptools.packages.find]
