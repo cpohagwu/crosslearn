@@ -174,12 +174,12 @@ class _SequentialWindowEnv(gym.Env):
         self,
         *,
         df,
-        feature_columns: list[str],
+        feature_names: list[str],
         window_size: int,
         frame_bound: tuple[int, int],
     ) -> None:
         self.df = df.reset_index(drop=True).copy()
-        self.feature_columns = list(feature_columns)
+        self.feature_names = list(feature_names)
         self.window_size = int(window_size)
         self.frame_bound = (int(frame_bound[0]), int(frame_bound[1]))
         self._max_steps = self.frame_bound[1] - self.frame_bound[0]
@@ -188,7 +188,7 @@ class _SequentialWindowEnv(gym.Env):
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.window_size, len(self.feature_columns)),
+            shape=(self.window_size, len(self.feature_names)),
             dtype=np.float32,
         )
         self.action_space = gym.spaces.Discrete(2)
@@ -196,7 +196,7 @@ class _SequentialWindowEnv(gym.Env):
     def _window(self) -> np.ndarray:
         end = self.frame_bound[0] + self._position
         start = end - self.window_size
-        return self.df.iloc[start:end][self.feature_columns].to_numpy(dtype=np.float32)
+        return self.df.iloc[start:end][self.feature_names].to_numpy(dtype=np.float32)
 
     def reset(self, *, seed: int | None = None, options=None):
         super().reset(seed=seed)
@@ -595,43 +595,43 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
 
     full = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
-        drop_feature_columns=False,
+        drop_feature_names=False,
         trim_warmup=False,
     )
     full_with_nan_warmup = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
-        drop_feature_columns=False,
+        drop_feature_names=False,
         return_transformed_warmup=False,
         trim_warmup=False,
     )
     trimmed = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
-        drop_feature_columns=True,
+        drop_feature_names=True,
         trim_warmup=True,
     )
     trimmed_without_warmup_scores = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
-        drop_feature_columns=True,
+        drop_feature_names=True,
         return_transformed_warmup=False,
         trim_warmup=True,
     )
@@ -655,19 +655,37 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
     )
 
 
+def test_walkforward_pca_dataframe_uses_all_numeric_features_when_names_are_omitted() -> None:
+    df = _make_pca_dataframe()
+    df["Symbol"] = ["TEST"] * len(df)
+
+    transformed = walkforward_pca_dataframe(
+        df,
+        warmup=3,
+        standardize=True,
+        device="cpu",
+        drop_feature_names=True,
+        trim_warmup=True,
+    )
+
+    assert "Symbol" in transformed.columns
+    assert not {"Open", "Close", "Volume"}.intersection(transformed.columns)
+    assert [column for column in transformed.columns if column.startswith("pca_")]
+
+
 def test_walkforward_pca_dataframe_n_components_controls_output_columns() -> None:
     df = _make_pca_dataframe()
 
     transformed = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=4,
         explained_variance_threshold=1.0,
         n_components=1,
         standardize=False,
         device="cpu",
         output_prefix="pca_",
-        drop_feature_columns=True,
+        drop_feature_names=True,
         trim_warmup=True,
     )
 
@@ -682,7 +700,7 @@ def test_walkforward_pca_dataframe_returns_initial_warmup_fit_transform() -> Non
 
     transformed = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -713,7 +731,7 @@ def test_walkforward_pca_dataframe_exact_warmup_length_handles_trim_modes() -> N
 
     full = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -721,7 +739,7 @@ def test_walkforward_pca_dataframe_exact_warmup_length_handles_trim_modes() -> N
     )
     trimmed = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -741,7 +759,7 @@ def test_walkforward_pca_dataframe_batching_matches_rowwise_cpu() -> None:
 
     rowwise = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -750,7 +768,7 @@ def test_walkforward_pca_dataframe_batching_matches_rowwise_cpu() -> None:
     )
     batched = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -770,7 +788,7 @@ def test_walkforward_pca_dataframe_covariance_solver_matches_svd() -> None:
 
     svd_result = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         solver="svd",
@@ -781,7 +799,7 @@ def test_walkforward_pca_dataframe_covariance_solver_matches_svd() -> None:
     )
     covariance_result = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         solver="covariance_eigh",
@@ -806,7 +824,7 @@ def test_walkforward_pca_dataframe_rolling_matches_rowwise_cpu() -> None:
 
     rowwise = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         solver="svd",
@@ -818,7 +836,7 @@ def test_walkforward_pca_dataframe_rolling_matches_rowwise_cpu() -> None:
     )
     batched = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         solver="svd",
@@ -844,7 +862,7 @@ def test_walkforward_pca_dataframe_progress_bar_matches_default(
 
     base = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -852,7 +870,7 @@ def test_walkforward_pca_dataframe_progress_bar_matches_default(
     )
     with_progress = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -873,7 +891,7 @@ def test_walkforward_pca_dataframe_progress_bar_tracks_rows(monkeypatch) -> None
 
     transformed = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         device="cpu",
@@ -913,7 +931,7 @@ def test_walkforward_pca_dataframe_progress_bar_requires_tqdm(
     with pytest.raises(ImportError, match="tqdm"):
         walkforward_pca_dataframe(
             df,
-            feature_columns=["Open", "Close", "Volume"],
+            feature_names=["Open", "Close", "Volume"],
             warmup=3,
             standardize=True,
             device="cpu",
@@ -997,7 +1015,7 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
     df = _make_pca_dataframe()
     lookback = 3
     warmup = 3
-    feature_columns = ["Open", "Close", "Volume"]
+    feature_names = ["Open", "Close", "Volume"]
     agent_frame_bound = (lookback + warmup, len(df))
     history_frame_bound = (agent_frame_bound[0] - warmup, agent_frame_bound[1])
 
@@ -1005,12 +1023,12 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         df,
         lookback=lookback,
         frame_bound=history_frame_bound,
-        feature_columns=feature_columns,
+        feature_names=feature_names,
         selected_columns=["Close", "Volume"],
     )
     expected_df = walkforward_pca_dataframe(
         embedded,
-        feature_columns=[
+        feature_names=[
             column for column in embedded.columns if column.startswith("chronos_")
         ],
         warmup=warmup,
@@ -1022,14 +1040,14 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         device="cpu",
         batch_size=2,
         output_prefix="pca_",
-        drop_feature_columns=True,
+        drop_feature_names=True,
         trim_warmup=True,
     )
     expected = expected_df.filter(like="pca_").to_numpy(dtype=np.float32)
 
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=feature_columns,
+        feature_names=feature_names,
         window_size=lookback,
         frame_bound=agent_frame_bound,
     )
@@ -1037,7 +1055,7 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         env,
         lookback=lookback,
         warmup=warmup,
-        feature_columns=feature_columns,
+        feature_names=feature_names,
         selected_columns=["Close", "Volume"],
         solver=solver,
         expanding_warmup=expanding_warmup,
@@ -1070,7 +1088,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
     df = _make_pca_dataframe()
     lookback = 3
     warmup = 3
-    feature_columns = ["Open", "Close", "Volume"]
+    feature_names = ["Open", "Close", "Volume"]
     agent_frame_bound = (lookback + warmup, len(df))
     history_frame_bound = (agent_frame_bound[0] - warmup, agent_frame_bound[1])
 
@@ -1078,12 +1096,12 @@ def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
         df,
         lookback=lookback,
         frame_bound=history_frame_bound,
-        feature_columns=feature_columns,
+        feature_names=feature_names,
         selected_columns=["Close", "Volume"],
     )
     expected_df = walkforward_pca_dataframe(
         embedded,
-        feature_columns=[column for column in embedded.columns if column.startswith("chronos_")],
+        feature_names=[column for column in embedded.columns if column.startswith("chronos_")],
         warmup=warmup,
         explained_variance_threshold=0.99,
         n_components=1,
@@ -1092,14 +1110,14 @@ def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
         device="cpu",
         batch_size=2,
         output_prefix="pca_",
-        drop_feature_columns=True,
+        drop_feature_names=True,
         trim_warmup=True,
     )
     expected = expected_df.filter(like="pca_").to_numpy(dtype=np.float32)
 
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=feature_columns,
+        feature_names=feature_names,
         window_size=lookback,
         frame_bound=agent_frame_bound,
     )
@@ -1107,7 +1125,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
         env,
         lookback=lookback,
         warmup=warmup,
-        feature_columns=feature_columns,
+        feature_names=feature_names,
         selected_columns=["Close", "Volume"],
         n_components=1,
         compute_dtype=torch.float64,
@@ -1131,7 +1149,7 @@ def test_walkforward_chronos_pca_wrapper_rejects_n_components_above_threshold(
     warmup = 3
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         window_size=lookback,
         frame_bound=(lookback + warmup, len(df)),
     )
@@ -1141,7 +1159,7 @@ def test_walkforward_chronos_pca_wrapper_rejects_n_components_above_threshold(
             env,
             lookback=lookback,
             warmup=warmup,
-            feature_columns=["Open", "Close", "Volume"],
+            feature_names=["Open", "Close", "Volume"],
             selected_columns=["Close", "Volume"],
             n_components=999,
             device_map="cpu",
@@ -1165,7 +1183,7 @@ def test_walkforward_chronos_pca_wrapper_validates_boundary_requirements(
     df = _make_pca_dataframe().iloc[:df_length].reset_index(drop=True)
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         window_size=3,
         frame_bound=frame_bound,
     )
@@ -1175,7 +1193,7 @@ def test_walkforward_chronos_pca_wrapper_validates_boundary_requirements(
             env,
             lookback=3,
             warmup=3,
-            feature_columns=["Open", "Close", "Volume"],
+            feature_names=["Open", "Close", "Volume"],
             selected_columns=["Close", "Volume"],
             device_map="cpu",
         )
@@ -1189,7 +1207,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_exact_minimum_dataset(
     warmup = 3
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         window_size=lookback,
         frame_bound=(lookback + warmup, len(df)),
     )
@@ -1197,7 +1215,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_exact_minimum_dataset(
         env,
         lookback=lookback,
         warmup=warmup,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cpu",
     )
@@ -1207,8 +1225,37 @@ def test_walkforward_chronos_pca_wrapper_accepts_exact_minimum_dataset(
     assert obs.shape == wrapped.observation_space.shape
     assert fake_chronos.last_pipeline is not None
     assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
-        (warmup, lookback, 2),
-        (1, lookback, 2),
+        (warmup, 2, lookback),
+        (1, 2, lookback),
+    ]
+
+
+def test_walkforward_chronos_pca_wrapper_uses_all_numeric_features_when_names_are_omitted(
+    fake_chronos,
+) -> None:
+    df = _make_pca_dataframe()
+    df["Symbol"] = ["TEST"] * len(df)
+    lookback = 3
+    warmup = 3
+    env = _SequentialWindowEnv(
+        df=df,
+        feature_names=["Open", "Close", "Volume"],
+        window_size=lookback,
+        frame_bound=(lookback + warmup, len(df)),
+    )
+
+    wrapped = WalkForwardChronosPCAWrapper(
+        env,
+        lookback=lookback,
+        warmup=warmup,
+        selected_columns=["Close", "Volume"],
+        device_map="cpu",
+    )
+
+    assert wrapped.feature_names == ["Open", "Close", "Volume"]
+    assert fake_chronos.last_pipeline is not None
+    assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
+        (warmup, 2, lookback),
     ]
 
 
@@ -1221,7 +1268,7 @@ def test_walkforward_chronos_pca_wrapper_embeds_only_one_new_window_per_step(
 
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         window_size=lookback,
         frame_bound=(lookback + warmup, len(df)),
     )
@@ -1229,29 +1276,29 @@ def test_walkforward_chronos_pca_wrapper_embeds_only_one_new_window_per_step(
         env,
         lookback=lookback,
         warmup=warmup,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cpu",
     )
 
     assert fake_chronos.last_pipeline is not None
     assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
-        (warmup, lookback, 2),
+        (warmup, 2, lookback),
     ]
 
     wrapped.reset()
     assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
-        (warmup, lookback, 2),
-        (1, lookback, 2),
+        (warmup, 2, lookback),
+        (1, 2, lookback),
     ]
 
     wrapped.step(0)
     wrapped.step(0)
     assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
-        (warmup, lookback, 2),
-        (1, lookback, 2),
-        (1, lookback, 2),
-        (1, lookback, 2),
+        (warmup, 2, lookback),
+        (1, 2, lookback),
+        (1, 2, lookback),
+        (1, 2, lookback),
     ]
 
 
@@ -1273,7 +1320,7 @@ def test_walkforward_chronos_pca_wrapper_requests_tensor_embeddings_on_cpu(
     warmup = 3
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         window_size=lookback,
         frame_bound=(lookback + warmup, len(df)),
     )
@@ -1281,7 +1328,7 @@ def test_walkforward_chronos_pca_wrapper_requests_tensor_embeddings_on_cpu(
         env,
         lookback=lookback,
         warmup=warmup,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cpu",
         pca_device="cpu",
@@ -1314,7 +1361,7 @@ def test_walkforward_chronos_pca_wrapper_supports_split_devices(
     df = _make_pca_dataframe()
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         window_size=3,
         frame_bound=(6, len(df)),
     )
@@ -1322,7 +1369,7 @@ def test_walkforward_chronos_pca_wrapper_supports_split_devices(
         env,
         lookback=3,
         warmup=3,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cuda",
         pca_device="cpu",
@@ -1384,7 +1431,7 @@ def test_walkforward_pca_dataframe_cuda_matches_cpu(solver: str) -> None:
 
     cpu_result = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         solver=solver,
@@ -1395,7 +1442,7 @@ def test_walkforward_pca_dataframe_cuda_matches_cpu(solver: str) -> None:
     )
     cuda_result = walkforward_pca_dataframe(
         df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         warmup=3,
         standardize=True,
         solver=solver,
@@ -1427,7 +1474,7 @@ def test_walkforward_chronos_pca_wrapper_cuda_returns_numpy_observations(
 
     env = _SequentialWindowEnv(
         df=df,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         window_size=lookback,
         frame_bound=(lookback + warmup, len(df)),
     )
@@ -1435,7 +1482,7 @@ def test_walkforward_chronos_pca_wrapper_cuda_returns_numpy_observations(
         env,
         lookback=lookback,
         warmup=warmup,
-        feature_columns=["Open", "Close", "Volume"],
+        feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         solver=solver,
         compute_dtype=torch.float64,

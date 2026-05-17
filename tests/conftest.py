@@ -17,17 +17,25 @@ class _FakeChronosPipeline:
         self.calls.append(context_t.clone())
 
         if context_t.ndim == 2:
-            context_t = context_t.unsqueeze(0)
-
-        summary = torch.stack(
-            [
-                context_t.mean(dim=(1, 2)),
-                context_t[:, :, 0].mean(dim=1),
-                context_t[:, :, -1].mean(dim=1),
-                context_t[:, -1, :].mean(dim=1),
-            ],
-            dim=-1,
-        )
+            summary = torch.stack(
+                [
+                    context_t.mean(dim=1),
+                    context_t[:, 0],
+                    context_t[:, -1],
+                    context_t[:, -1],
+                ],
+                dim=-1,
+            )
+        else:
+            summary = torch.stack(
+                [
+                    context_t.mean(dim=(1, 2)),
+                    context_t[:, :, 0].mean(dim=1),
+                    context_t[:, :, -1].mean(dim=1),
+                    context_t[:, -1, :].mean(dim=1),
+                ],
+                dim=-1,
+            )
         embeddings = [
             torch.stack([summary[index], summary[index] + 5.0], dim=0)
             for index in range(summary.shape[0])

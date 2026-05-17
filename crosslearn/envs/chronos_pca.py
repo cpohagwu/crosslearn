@@ -7,7 +7,10 @@ import numpy as np
 import torch
 
 from crosslearn._devices import resolve_device
-from crosslearn.extractors.chronos import ChronosEmbedder
+from crosslearn.extractors.chronos import (
+    ChronosEmbedder,
+    _resolve_dataframe_feature_names,
+)
 from crosslearn.extractors.pca import (
     _PCAFitState,
     _fit_pca,
@@ -48,7 +51,7 @@ class WalkForwardChronosPCAWrapper(
 
     The wrapped environment is expected to emit raw rolling-window
     observations compatible with ``ChronosEmbedder.embed_windows(...)`` for a
-    single window, typically ``(lookback, len(feature_columns))``.
+    single window, typically ``(lookback, len(feature_names))``.
 
     Args:
         env: Sequential wrapped environment. It should be deterministic with
@@ -57,8 +60,9 @@ class WalkForwardChronosPCAWrapper(
         lookback: Number of rows per raw observation window.
         warmup: Number of initial embedded observations used to fit the first
             PCA state and determine the fixed component count.
-        feature_columns: Raw dataframe columns used to reconstruct historical
-            windows for the Chronos warmup history.
+        feature_names: Raw dataframe columns used to reconstruct historical
+            windows for the Chronos warmup history. When omitted, all numeric
+            dataframe columns are used.
         df: Optional source dataframe. When omitted, ``env.df`` is used.
         frame_bound: Optional two-element agent-visible span. When omitted,
             ``env.frame_bound`` is used. The wrapper requires
@@ -67,9 +71,9 @@ class WalkForwardChronosPCAWrapper(
         history_frame_bound: Optional consistency-checked alias for the implied
             history slice ``(frame_bound[0] - warmup, frame_bound[1])``. It is
             not an independent tuning knob.
-        selected_columns: Optional subset of ``feature_columns`` to embed by
+        selected_columns: Optional subset of ``feature_names`` to embed by
             name before Chronos is called.
-        selected_indices: Optional subset of ``feature_columns`` to embed by
+        selected_indices: Optional subset of ``feature_names`` to embed by
             index before Chronos is called.
         explained_variance_threshold: Cumulative explained-variance threshold
             used on the initial warmup PCA fit to choose the fixed component
@@ -95,6 +99,7 @@ class WalkForwardChronosPCAWrapper(
         pca_device: Optional separate device for PCA math. When omitted,
             CrossLearn uses the same resolved device as ``device_map``.
         dtype: Torch dtype used when loading Chronos.
+        cache_size: Optional LRU cache size for repeated online windows.
 
     Example::
 
@@ -102,7 +107,7 @@ class WalkForwardChronosPCAWrapper(
             env,
             lookback=32,
             warmup=500,
-            feature_columns=["open", "high", "low", "close", "volume"],
+            feature_names=["open", "high", "low", "close", "volume"],
             frame_bound=(532, len(df)),
             solver="svd",
             expanding_warmup=True,
@@ -120,7 +125,7 @@ class WalkForwardChronosPCAWrapper(
         *,
         lookback: int,
         warmup: int,
-        feature_columns: Sequence[str],
+        feature_names: Sequence[str] | None = None,
         df: Any | None = None,
         frame_bound: Sequence[int] | None = None,
         history_frame_bound: Sequence[int] | None = None,
@@ -138,12 +143,13 @@ class WalkForwardChronosPCAWrapper(
         device_map: str | torch.device = "auto",
         pca_device: str | torch.device | None = None,
         dtype: torch.dtype = torch.float32,
+        cache_size: int | None = 16_384,
     ) -> None:
         gym.utils.RecordConstructorArgs.__init__(
             self,
             lookback=lookback,
             warmup=warmup,
-            feature_columns=list(feature_columns),
+            feature_names=list(feature_names) if feature_names is not None else None,
             frame_bound=tuple(frame_bound) if frame_bound is not None else None,
             history_frame_bound=(
                 tuple(history_frame_bound)
@@ -170,6 +176,7 @@ class WalkForwardChronosPCAWrapper(
             device_map=device_map,
             pca_device=str(pca_device) if pca_device is not None else None,
             dtype=dtype,
+            cache_size=cache_size,
         )
         super().__init__(env)
 
@@ -184,16 +191,11 @@ class WalkForwardChronosPCAWrapper(
         self.warmup = int(warmup)
         if self.warmup < 2:
             raise ValueError("warmup must be at least 2 for PCA.")
-        self.feature_columns = [str(column) for column in feature_columns]
-        if not self.feature_columns:
-            raise ValueError("feature_columns must contain at least one column name.")
-        missing_columns = [
-            column for column in self.feature_columns if column not in self.df.columns
-        ]
-        if missing_columns:
-            raise ValueError(
-                f"Missing dataframe columns for Chronos + PCA wrapper: {missing_columns}"
-            )
+        self.feature_names = _resolve_dataframe_feature_names(
+            self.df,
+            feature_names=feature_names,
+            context="Chronos + PCA wrapper",
+        )
 
         self.agent_frame_bound = (
             tuple(int(bound) for bound in frame_bound)
@@ -249,11 +251,12 @@ class WalkForwardChronosPCAWrapper(
         self.embedder = ChronosEmbedder(
             model_name=model_name,
             pooling=pooling,
-            feature_names=self.feature_columns,
+            feature_names=self.feature_names,
             selected_columns=selected_columns,
             selected_indices=selected_indices,
             device_map=device_map,
             dtype=dtype,
+            cache_size=cache_size,
         )
 
         warmup_windows = np.stack(
@@ -269,8 +272,8 @@ class WalkForwardChronosPCAWrapper(
         warmup_embeddings = self.embedder.embed_windows(
             warmup_windows,
             lookback=self.lookback,
-            n_features=len(self.feature_columns),
-            feature_names=self.feature_columns,
+            n_features=len(self.feature_names),
+            feature_names=self.feature_names,
             as_tensor=True,
             output_device=self.pca_device,
         )
@@ -317,7 +320,7 @@ class WalkForwardChronosPCAWrapper(
             end_index: Exclusive dataframe end index for the window.
 
         Returns:
-            A ``float32`` array of shape ``(lookback, len(feature_columns))``.
+            A ``float32`` array of shape ``(lookback, len(feature_names))``.
         """
         if end_index < self.lookback:
             raise ValueError(
@@ -326,7 +329,7 @@ class WalkForwardChronosPCAWrapper(
         if end_index > len(self.df):
             raise ValueError(f"end_index={end_index} exceeds len(df)={len(self.df)}.")
         return self.df.iloc[end_index - self.lookback : end_index][
-            self.feature_columns
+            self.feature_names
         ].to_numpy(dtype=np.float32, copy=True)
 
     def _embed_single_observation(self, observation: np.ndarray) -> torch.Tensor:
@@ -342,8 +345,8 @@ class WalkForwardChronosPCAWrapper(
         embedded = self.embedder.embed_windows(
             observation,
             lookback=self.lookback,
-            n_features=len(self.feature_columns),
-            feature_names=self.feature_columns,
+            n_features=len(self.feature_names),
+            feature_names=self.feature_names,
             as_tensor=True,
             output_device=self.pca_device,
         )

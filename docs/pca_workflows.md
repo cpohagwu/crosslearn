@@ -284,7 +284,7 @@ from crosslearn.extractors import walkforward_pca_dataframe
 
 pca_df = walkforward_pca_dataframe(
     df,
-    feature_columns=["feature_a", "feature_b", "feature_c"],
+    feature_names=["feature_a", "feature_b", "feature_c"],
     warmup=500,
     explained_variance_threshold=0.99,
     n_components=None,
@@ -295,7 +295,7 @@ pca_df = walkforward_pca_dataframe(
     device="auto",
     batch_size=128,
     output_prefix="pca_",
-    drop_feature_columns=False,
+    drop_feature_names=False,
     return_transformed_warmup=True,
     trim_warmup=False,
     progress_bar=True,
@@ -304,7 +304,7 @@ pca_df = walkforward_pca_dataframe(
 
 Key arguments:
 
-- `feature_columns`: source columns to reduce
+- `feature_names`: source columns to reduce
 - `warmup`: number of rows required before the first future-safe next-row
   projection is available
 - `explained_variance_threshold`: upper-bound component policy from the initial
@@ -338,14 +338,14 @@ embedded_df = embed_dataframe(
     df,
     lookback=30,
     frame_bound=(30, len(df)),
-    feature_columns=["Open", "High", "Low", "Close", "Volume"],
+    feature_names=["Open", "High", "Low", "Close", "Volume"],
     selected_columns=["Close", "Volume"],
     progress_bar=True,
 )
 
 pca_df = walkforward_pca_dataframe(
     embedded_df,
-    feature_columns=embedded_df.filter(like="chronos_").columns.tolist(),
+    feature_names=embedded_df.filter(like="chronos_").columns.tolist(),
     warmup=500,
     explained_variance_threshold=0.99,
     standardize=True,
@@ -355,7 +355,7 @@ pca_df = walkforward_pca_dataframe(
     device="cpu",
     batch_size=64,
     output_prefix="pca_",
-    drop_feature_columns=True,
+    drop_feature_names=True,
     trim_warmup=True,
     progress_bar=True,
 )
@@ -390,7 +390,7 @@ wrapped_env = WalkForwardChronosPCAWrapper(
     env,
     lookback=30,
     warmup=500,
-    feature_columns=["Open", "High", "Low", "Close", "Volume"],
+    feature_names=["Open", "High", "Low", "Close", "Volume"],
     selected_columns=["Close", "Volume"],
     n_components=None,
     solver="covariance_eigh",
@@ -516,5 +516,7 @@ This is a different problem from `eigh` convergence:
 
 - [Chronos guide](./chronos.md)
 - `ChronosExtractor` for online embedding without adaptive PCA
+- `WalkForwardChronosWrapper` for env-side online Chronos embedding without
+  adaptive PCA
 - `ChronosEmbedder.transform_dataframe(...)` for lower-level aligned embedding
   augmentation

@@ -934,8 +934,8 @@ class WalkForwardPCATransformer:
 def walkforward_pca_dataframe(
     df: Any,
     *,
-    feature_columns: Sequence[str],
     warmup: int,
+    feature_names: Sequence[str] | None = None,
     explained_variance_threshold: float = 0.99,
     n_components: int | None = None,
     standardize: bool = True,
@@ -945,7 +945,7 @@ def walkforward_pca_dataframe(
     device: str | torch.device = "auto",
     batch_size: int = _PCA_BATCH_SIZE,
     output_prefix: str = "pca_",
-    drop_feature_columns: bool = False,
+    drop_feature_names: bool = False,
     return_transformed_warmup: bool = True,
     trim_warmup: bool = True,
     progress_bar: bool = False,
@@ -965,7 +965,8 @@ def walkforward_pca_dataframe(
 
     Args:
         df: Source pandas dataframe in chronological order.
-        feature_columns: Numeric columns to reduce with walk-forward PCA.
+        feature_names: Numeric dataframe columns to reduce with walk-forward
+            PCA. When omitted, all numeric dataframe columns are used.
         warmup: Number of initial rows used to determine the fixed PCA width.
         explained_variance_threshold: Initial cumulative explained-variance
             threshold used to choose ``n_components_``.
@@ -986,8 +987,8 @@ def walkforward_pca_dataframe(
         batch_size: Number of chronological PCA windows to process per offline
             chunk.
         output_prefix: Prefix for appended PCA columns.
-        drop_feature_columns: If ``True``, drop the original
-            ``feature_columns`` after adding the PCA columns.
+        drop_feature_names: If ``True``, drop the resolved source features
+            after adding the PCA columns.
         return_transformed_warmup: If ``True``, populate the first ``warmup``
             PCA rows with the initial warmup fit-transform. These rows are
             retrospective PCA scores, not future-safe next-row projections. If
@@ -1006,7 +1007,8 @@ def walkforward_pca_dataframe(
 
     Raises:
         TypeError: If ``df`` is not a pandas dataframe.
-        ValueError: If ``feature_columns`` is empty or missing from ``df``.
+        ValueError: If no numeric features can be resolved, or if requested
+            ``feature_names`` are missing from ``df``.
 
     Example::
 
@@ -1014,14 +1016,14 @@ def walkforward_pca_dataframe(
             df,
             lookback=32,
             frame_bound=(32, len(df)),
-            feature_columns=["open", "high", "low", "close", "volume"],
+            feature_names=["open", "high", "low", "close", "volume"],
         )
         chronos_columns = [
             column for column in embedded.columns if column.startswith("chronos_")
         ]
         reduced = walkforward_pca_dataframe(
             embedded,
-            feature_columns=chronos_columns,
+            feature_names=chronos_columns,
             warmup=500,
             explained_variance_threshold=0.99,
             solver="svd",
@@ -1044,15 +1046,20 @@ def walkforward_pca_dataframe(
     if not isinstance(df, pd.DataFrame):
         raise TypeError("walkforward_pca_dataframe expects a pandas.DataFrame.")
 
-    resolved_feature_columns = [str(column) for column in feature_columns]
-    if not resolved_feature_columns:
-        raise ValueError("feature_columns must contain at least one column name.")
+    if feature_names is None:
+        resolved_feature_names = df.select_dtypes(include=[np.number]).columns.tolist()
+    else:
+        resolved_feature_names = [str(name) for name in feature_names]
+    if not resolved_feature_names:
+        raise ValueError(
+            "walk-forward PCA requires at least one numeric feature column."
+        )
 
-    missing = [column for column in resolved_feature_columns if column not in df.columns]
+    missing = [column for column in resolved_feature_names if column not in df.columns]
     if missing:
         raise ValueError(f"Missing dataframe columns for walk-forward PCA: {missing}")
 
-    values = df.loc[:, resolved_feature_columns].to_numpy(dtype=np.float32, copy=True)
+    values = df.loc[:, resolved_feature_names].to_numpy(dtype=np.float32, copy=True)
     transformer = WalkForwardPCATransformer(
         warmup=warmup,
         explained_variance_threshold=explained_variance_threshold,
@@ -1088,8 +1095,8 @@ def walkforward_pca_dataframe(
         pca_frame.iloc[warmup:] = projected
 
     result = pd.concat([df.copy(), pca_frame], axis=1)
-    if drop_feature_columns:
-        result = result.drop(columns=resolved_feature_columns)
+    if drop_feature_names:
+        result = result.drop(columns=resolved_feature_names)
     if trim_warmup:
         result = result.iloc[warmup:].reset_index(drop=True)
     return result

@@ -21,3 +21,4 @@ examples/video/
 examples/wandb/
 
 .ipynb_checkpoints/
+*.csv

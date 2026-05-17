@@ -8,6 +8,9 @@ inspiration for Chronos-based reinforcement learning on market data.
 
 from __future__ import annotations
 
+import inspect
+import warnings
+from collections import OrderedDict
 from typing import Any, Literal, Sequence, TypeAlias
 
 import gymnasium as gym
@@ -21,6 +24,7 @@ from crosslearn.extractors.base import BaseFeaturesExtractor
 PoolingMode: TypeAlias = Literal["mean", "last"]
 WindowInput: TypeAlias = np.ndarray | torch.Tensor | Sequence[float]
 _DATAFRAME_PROGRESS_BATCH_SIZE = 256
+_DEFAULT_ONLINE_CACHE_SIZE = 16_384
 
 
 def _load_pipeline(
@@ -82,6 +86,25 @@ def _pool_embeddings(embeddings: Any, pooling: PoolingMode) -> torch.Tensor:
     if pooling == "last":
         return token_embeddings[:, -1, :]
     return token_embeddings.mean(dim=1)
+
+
+def _stack_embedding_items(embeddings: Any) -> torch.Tensor:
+    if isinstance(embeddings, (list, tuple)):
+        if not embeddings:
+            raise ValueError("Chronos returned an empty embedding batch.")
+        return torch.stack([_as_float_tensor(item) for item in embeddings], dim=0)
+    return _as_float_tensor(embeddings)
+
+
+def _infer_model_device(model: Any, fallback: str | torch.device) -> torch.device:
+    device = getattr(model, "device", None)
+    if device is None:
+        try:
+            first_parameter = next(model.parameters())
+        except (AttributeError, StopIteration):
+            return torch.device(fallback)
+        return first_parameter.device
+    return torch.device(device)
 
 
 def _infer_flat_feature_count(
@@ -146,9 +169,38 @@ def _normalize_window_batch(
     lookback: int | None = None,
     n_features: int | None = None,
 ) -> tuple[torch.Tensor, int, int]:
+    """Normalize windows to Chronos layout ``(batch, n_features, lookback)``."""
     tensor = _as_float_tensor(windows)
 
     if tensor.ndim == 3:
+        if lookback is not None and n_features is not None:
+            if tuple(tensor.shape[1:]) == (lookback, n_features):
+                return tensor.transpose(1, 2), lookback, n_features
+            if tuple(tensor.shape[1:]) == (n_features, lookback):
+                return tensor, lookback, n_features
+            raise ValueError(
+                f"Expected batched Chronos windows shaped either "
+                f"(batch, lookback={lookback}, n_features={n_features}) or "
+                f"(batch, n_features={n_features}, lookback={lookback}), got "
+                f"{tuple(tensor.shape)}."
+            )
+
+        if (
+            lookback is not None
+            and tensor.shape[2] == lookback
+            and tensor.shape[1] != lookback
+        ):
+            inferred_features = int(tensor.shape[1])
+            return tensor, lookback, inferred_features
+
+        if (
+            n_features is not None
+            and tensor.shape[1] == n_features
+            and tensor.shape[2] != n_features
+        ):
+            inferred_lookback = int(tensor.shape[2])
+            return tensor, inferred_lookback, n_features
+
         inferred_lookback = int(tensor.shape[1])
         inferred_features = int(tensor.shape[2])
         if lookback is not None and inferred_lookback != lookback:
@@ -159,7 +211,7 @@ def _normalize_window_batch(
             raise ValueError(
                 f"Expected n_features={n_features}, got windows with shape {tuple(tensor.shape)}."
             )
-        return tensor, inferred_lookback, inferred_features
+        return tensor.transpose(1, 2), inferred_lookback, inferred_features
 
     if tensor.ndim == 2:
         expected_shape = (
@@ -167,7 +219,13 @@ def _normalize_window_batch(
             n_features if n_features is not None else int(tensor.shape[1]),
         )
         if tuple(tensor.shape) == expected_shape:
-            return tensor.unsqueeze(0), int(tensor.shape[0]), int(tensor.shape[1])
+            return tensor.transpose(0, 1).unsqueeze(0), int(tensor.shape[0]), int(tensor.shape[1])
+        if (
+            lookback is not None
+            and n_features is not None
+            and tuple(tensor.shape) == (n_features, lookback)
+        ):
+            return tensor.unsqueeze(0), lookback, n_features
 
         if lookback is None:
             raise ValueError("lookback is required when passing batched flat Chronos windows.")
@@ -189,7 +247,8 @@ def _normalize_window_batch(
                 "(lookback, n_features) or as batched flat windows "
                 "(batch, lookback * n_features)."
             )
-        return tensor.reshape(tensor.shape[0], lookback, inferred_features), lookback, inferred_features
+        batched_windows = tensor.reshape(tensor.shape[0], lookback, inferred_features)
+        return batched_windows.transpose(1, 2), lookback, inferred_features
 
     if tensor.ndim == 1:
         if lookback is None:
@@ -207,7 +266,8 @@ def _normalize_window_batch(
         expected_flat = lookback * inferred_features
         if int(tensor.numel()) != expected_flat:
             raise ValueError(f"Expected flat window size {expected_flat}, got {tensor.numel()}.")
-        return tensor.reshape(1, lookback, inferred_features), lookback, inferred_features
+        canonical = tensor.reshape(1, lookback, inferred_features).transpose(1, 2)
+        return canonical, lookback, inferred_features
 
     raise ValueError(
         "Chronos windows must be a 1D flat window, 2D single/batched flat window, "
@@ -317,6 +377,27 @@ def _normalize_frame_bound(frame_bound: Sequence[int]) -> tuple[int, int]:
     return int(frame_bound[0]), int(frame_bound[1])
 
 
+def _resolve_dataframe_feature_names(
+    df: Any,
+    *,
+    feature_names: Sequence[str] | None = None,
+    context: str = "Chronos dataframe input",
+) -> list[str]:
+    if feature_names is not None:
+        resolved = [str(name) for name in feature_names]
+    else:
+        resolved = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    if not resolved:
+        raise ValueError(f"{context} requires at least one numeric feature column.")
+
+    missing = [column for column in resolved if column not in df.columns]
+    if missing:
+        raise ValueError(f"Missing dataframe columns for {context}: {missing}")
+
+    return resolved
+
+
 class ChronosEmbedder:
     """Frozen Chronos wrapper for online and offline rolling-window embeddings.
 
@@ -350,6 +431,9 @@ class ChronosEmbedder:
         device_map: Target device for the Chronos model, for example
             ``"auto"``, ``"cpu"``, or ``"cuda"``.
         dtype: Torch dtype used when loading the Chronos pipeline.
+        embed_batch_size: Batch size forwarded to Chronos embedding APIs that
+            support it.
+        cache_size: Optional LRU cache size for repeated selected windows.
 
     Example::
 
@@ -372,9 +456,15 @@ class ChronosEmbedder:
         selected_indices: Sequence[int] | None = None,
         device_map: str = "auto",
         dtype: torch.dtype = torch.float32,
+        embed_batch_size: int = 256,
+        cache_size: int | None = None,
     ) -> None:
         if pooling not in {"mean", "last"}:
             raise ValueError("pooling must be either 'mean' or 'last'.")
+        if embed_batch_size <= 0:
+            raise ValueError("embed_batch_size must be greater than 0.")
+        if cache_size is not None and cache_size < 0:
+            raise ValueError("cache_size must be non-negative or None.")
 
         self.model_name = model_name
         self.pooling = pooling
@@ -389,9 +479,20 @@ class ChronosEmbedder:
         )
         self.device_map = resolve_device_map(device_map)
         self.dtype = dtype
+        self.embed_batch_size = int(embed_batch_size)
+        self.cache_size = None if cache_size is None else int(cache_size)
 
         self.pipeline = _load_pipeline(model_name, device_map=self.device_map, dtype=dtype)
+        model = getattr(self.pipeline, "model", None)
+        if callable(getattr(model, "eval", None)):
+            model.eval()
         self.embedding_dim: int | None = None
+        self._embedding_cache: OrderedDict[tuple[tuple[int, ...], bytes], torch.Tensor] = (
+            OrderedDict()
+        )
+        self.last_embedding_path: str | None = None
+        self.last_fallback_reason: str | None = None
+        self._warned_direct_fallback = False
 
     def _resolve_selection(
         self,
@@ -408,6 +509,288 @@ class ChronosEmbedder:
             selected_columns=self.selected_columns,
             selected_indices=self.selected_indices,
         )
+
+    def clear_cache(self) -> None:
+        """Clear cached Chronos embeddings held by this embedder."""
+        self._embedding_cache.clear()
+
+    def _cache_enabled(self) -> bool:
+        return self.cache_size is not None and self.cache_size > 0
+
+    def _cache_key(self, window: torch.Tensor) -> tuple[tuple[int, ...], bytes]:
+        contiguous = window.detach().to(device="cpu", dtype=torch.float32).contiguous()
+        return tuple(contiguous.shape), contiguous.numpy().tobytes()
+
+    def _get_cached_embedding(
+        self,
+        key: tuple[tuple[int, ...], bytes],
+    ) -> torch.Tensor | None:
+        cached = self._embedding_cache.get(key)
+        if cached is None:
+            return None
+        self._embedding_cache.move_to_end(key)
+        return cached.clone()
+
+    def _store_cached_embedding(
+        self,
+        key: tuple[tuple[int, ...], bytes],
+        embedding: torch.Tensor,
+    ) -> None:
+        if not self._cache_enabled():
+            return
+        self._embedding_cache[key] = embedding.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        ).clone()
+        self._embedding_cache.move_to_end(key)
+        while self.cache_size is not None and len(self._embedding_cache) > self.cache_size:
+            self._embedding_cache.popitem(last=False)
+
+    def _is_amazon_chronos_model(self) -> bool:
+        return self.model_name.lower().startswith("amazon/chronos")
+
+    def _is_chronos2_pipeline(self) -> bool:
+        if "chronos-2" in self.model_name.lower():
+            return True
+        pipeline_name = type(self.pipeline).__name__.lower()
+        if "chronos2" in pipeline_name or "chronos_2" in pipeline_name:
+            return True
+        model = getattr(self.pipeline, "model", None)
+        model_name = type(model).__name__.lower()
+        return "chronos2" in model_name or "chronos_2" in model_name
+
+    def _is_chronos_bolt_pipeline(self) -> bool:
+        if "chronos-bolt" in self.model_name.lower():
+            return True
+        pipeline_name = type(self.pipeline).__name__.lower()
+        model = getattr(self.pipeline, "model", None)
+        model_name = type(model).__name__.lower()
+        return "bolt" in pipeline_name or "bolt" in model_name
+
+    def _is_chronos_t5_pipeline(self) -> bool:
+        if "chronos-t5" in self.model_name.lower():
+            return True
+        tokenizer = getattr(self.pipeline, "tokenizer", None)
+        if not callable(getattr(tokenizer, "context_input_transform", None)):
+            return False
+        model = getattr(self.pipeline, "model", None)
+        return callable(getattr(model, "encode", None))
+
+    def _call_pipeline_embed(self, context: torch.Tensor) -> Any:
+        embed = self.pipeline.embed
+        try:
+            signature = inspect.signature(embed)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is not None and "batch_size" in signature.parameters:
+            return embed(context, batch_size=self.embed_batch_size)
+        return embed(context)
+
+    def _embed_chronos2_direct(self, selected_windows: torch.Tensor) -> torch.Tensor:
+        model = self.pipeline.model
+        batch_size, n_variates, lookback = selected_windows.shape
+        model_context_length = getattr(model.chronos_config, "context_length", None)
+        if model_context_length is not None and lookback > int(model_context_length):
+            lookback = int(model_context_length)
+            selected_windows = selected_windows[..., -lookback:]
+
+        model_device = _infer_model_device(model, self.device_map)
+        context = selected_windows.reshape(batch_size * n_variates, lookback).to(
+            device=model_device,
+            dtype=torch.float32,
+        )
+        group_ids = torch.arange(batch_size, device=model_device).repeat_interleave(
+            n_variates
+        )
+
+        with torch.inference_mode():
+            result = model.encode(context=context, group_ids=group_ids)
+
+        encoder_outputs = result[0] if isinstance(result, tuple) else result
+        hidden_states = (
+            encoder_outputs[0]
+            if isinstance(encoder_outputs, (tuple, list))
+            else getattr(encoder_outputs, "last_hidden_state", encoder_outputs)
+        )
+        hidden_states = _as_float_tensor(hidden_states)
+        grouped = hidden_states.reshape(batch_size, n_variates, *hidden_states.shape[1:])
+        pooled = _pool_embeddings(grouped, self.pooling).to(dtype=torch.float32)
+        if pooled.device.type != "cpu":
+            pooled = pooled.cpu()
+        return pooled
+
+    def _embed_chronos_bolt_direct(self, selected_windows: torch.Tensor) -> torch.Tensor:
+        model = self.pipeline.model
+        batch_size, n_variates, lookback = selected_windows.shape
+        model_device = _infer_model_device(model, self.device_map)
+        context = selected_windows.reshape(batch_size * n_variates, lookback).to(
+            device=model_device,
+            dtype=torch.float32,
+        )
+        mask = torch.isnan(context).logical_not()
+
+        with torch.inference_mode():
+            result = model.encode(context=context, mask=mask)
+
+        hidden_states = result[0] if isinstance(result, tuple) else result
+        hidden_states = _as_float_tensor(hidden_states)
+        grouped = hidden_states.reshape(batch_size, n_variates, *hidden_states.shape[1:])
+        pooled = _pool_embeddings(grouped, self.pooling).to(dtype=torch.float32)
+        if pooled.device.type != "cpu":
+            pooled = pooled.cpu()
+        return pooled
+
+    def _embed_chronos_t5_direct(self, selected_windows: torch.Tensor) -> torch.Tensor:
+        tokenizer = self.pipeline.tokenizer
+        model = self.pipeline.model
+        batch_size, n_variates, lookback = selected_windows.shape
+        context = selected_windows.reshape(batch_size * n_variates, lookback)
+
+        token_ids, attention_mask, _ = tokenizer.context_input_transform(context)
+        model_device = _infer_model_device(model, self.device_map)
+        with torch.inference_mode():
+            hidden_states = model.encode(
+                input_ids=token_ids.to(model_device),
+                attention_mask=attention_mask.to(model_device),
+            )
+
+        hidden_states = _as_float_tensor(hidden_states)
+        grouped = hidden_states.reshape(batch_size, n_variates, *hidden_states.shape[1:])
+        pooled = _pool_embeddings(grouped, self.pooling).to(dtype=torch.float32)
+        if pooled.device.type != "cpu":
+            pooled = pooled.cpu()
+        return pooled
+
+    def _embed_direct_amazon(self, selected_windows: torch.Tensor) -> torch.Tensor | None:
+        if self._is_chronos2_pipeline():
+            self.last_embedding_path = "chronos2_direct"
+            return self._embed_chronos2_direct(selected_windows)
+        if self._is_chronos_bolt_pipeline():
+            self.last_embedding_path = "chronos_bolt_direct"
+            return self._embed_chronos_bolt_direct(selected_windows)
+        if self._is_chronos_t5_pipeline():
+            self.last_embedding_path = "chronos_t5_direct"
+            return self._embed_chronos_t5_direct(selected_windows)
+        return None
+
+    def _warn_direct_fallback(self, exc: BaseException | str) -> None:
+        self.last_fallback_reason = str(exc)
+        if self._warned_direct_fallback:
+            return
+        self._warned_direct_fallback = True
+        warnings.warn(
+            "Direct Chronos model encoding failed or was unavailable; falling back "
+            "to pipeline.embed(...), which may be slower. Reason: "
+            f"{self.last_fallback_reason}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    def _embed_with_pipeline(self, selected_windows: torch.Tensor) -> torch.Tensor:
+        if self._is_chronos2_pipeline():
+            result = self._call_pipeline_embed(selected_windows)
+            embeddings = result[0] if isinstance(result, tuple) else result
+            pooled = _pool_embeddings(embeddings, self.pooling).to(dtype=torch.float32)
+            if pooled.device.type != "cpu":
+                pooled = pooled.cpu()
+            return pooled
+
+        batch_size, n_variates, lookback = selected_windows.shape
+        flat_context = selected_windows.reshape(batch_size * n_variates, lookback)
+        result = self._call_pipeline_embed(flat_context)
+        embeddings = result[0] if isinstance(result, tuple) else result
+        flat_embeddings = _stack_embedding_items(embeddings).to(dtype=torch.float32)
+        grouped = flat_embeddings.reshape(batch_size, n_variates, *flat_embeddings.shape[1:])
+        pooled = _pool_embeddings(grouped, self.pooling).to(dtype=torch.float32)
+        if pooled.device.type != "cpu":
+            pooled = pooled.cpu()
+        return pooled
+
+    def _embed_selected_windows_direct_or_fallback(
+        self,
+        selected_windows: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._is_amazon_chronos_model():
+            try:
+                direct_embeddings = self._embed_direct_amazon(selected_windows)
+                if direct_embeddings is not None:
+                    self.last_fallback_reason = None
+                    return direct_embeddings
+                self._warn_direct_fallback(
+                    f"no direct adapter matched {self.model_name!r}"
+                )
+            except (AttributeError, TypeError, RuntimeError, ValueError) as exc:
+                self._warn_direct_fallback(exc)
+
+        # Chronos pipeline.embed implementations stage batches through CPU
+        # validation/DataLoader paths, so the fallback always receives CPU tensors.
+        self.last_embedding_path = "pipeline_embed"
+        return self._embed_with_pipeline(selected_windows)
+
+    def _embed_selected_windows_uncached(
+        self,
+        selected_windows: torch.Tensor,
+    ) -> torch.Tensor:
+        n_variates = max(1, int(selected_windows.shape[1]))
+        max_windows_per_chunk = max(1, self.embed_batch_size // n_variates)
+        if int(selected_windows.shape[0]) <= max_windows_per_chunk:
+            return self._embed_selected_windows_direct_or_fallback(selected_windows)
+
+        embedding_batches: list[torch.Tensor] = []
+        for start in range(0, int(selected_windows.shape[0]), max_windows_per_chunk):
+            stop = min(start + max_windows_per_chunk, int(selected_windows.shape[0]))
+            embedding_batches.append(
+                self._embed_selected_windows_direct_or_fallback(
+                    selected_windows[start:stop]
+                )
+            )
+        return torch.cat(embedding_batches, dim=0)
+
+    def _embed_selected_windows(
+        self,
+        selected_windows: torch.Tensor,
+    ) -> torch.Tensor:
+        selected_windows = selected_windows.detach().to(
+            device="cpu",
+            dtype=torch.float32,
+        ).contiguous()
+
+        if not self._cache_enabled():
+            return self._embed_selected_windows_uncached(selected_windows)
+
+        outputs: list[torch.Tensor | None] = [None] * int(selected_windows.shape[0])
+        pending_keys: list[tuple[tuple[int, ...], bytes]] = []
+        pending_windows: list[torch.Tensor] = []
+        pending_positions: dict[tuple[tuple[int, ...], bytes], list[int]] = {}
+
+        for index, window in enumerate(selected_windows):
+            key = self._cache_key(window)
+            cached = self._get_cached_embedding(key)
+            if cached is not None:
+                outputs[index] = cached
+                continue
+            if key not in pending_positions:
+                pending_keys.append(key)
+                pending_windows.append(window)
+                pending_positions[key] = []
+            pending_positions[key].append(index)
+
+        if pending_windows:
+            miss_batch = torch.stack(pending_windows, dim=0)
+            miss_embeddings = self._embed_selected_windows_uncached(miss_batch)
+            for key, embedding in zip(pending_keys, miss_embeddings, strict=True):
+                cpu_embedding = embedding.detach().to(device="cpu", dtype=torch.float32)
+                self._store_cached_embedding(key, cpu_embedding)
+                for position in pending_positions[key]:
+                    outputs[position] = cpu_embedding.clone()
+
+        filled_outputs: list[torch.Tensor] = []
+        for output in outputs:
+            if output is None:
+                raise RuntimeError("Chronos embedding cache failed to populate all outputs.")
+            filled_outputs.append(output)
+        return torch.stack(filled_outputs, dim=0)
 
     def embed_windows(
         self,
@@ -426,7 +809,8 @@ class ChronosEmbedder:
         - flat 1D window: ``(lookback * n_features,)``
         - 2D single window: ``(lookback, n_features)``
         - 2D batch of flat windows: ``(batch, lookback * n_features)``
-        - 3D batch of windows: ``(batch, lookback, n_features)``
+        - 3D batch of windows: ``(batch, lookback, n_features)`` or
+          ``(batch, n_features, lookback)``
 
         Args:
             windows: One window or a batch of windows in any supported layout.
@@ -471,17 +855,8 @@ class ChronosEmbedder:
             total_n_features=inferred_features,
             feature_names=feature_names,
         )
-        selected_windows = normalized_windows[..., selected_indices]
-        # Chronos stages batches through its own CPU DataLoader/pin-memory path,
-        # so embed() must always receive dense CPU tensors even if the model is on CUDA.
-        if selected_windows.device.type != "cpu":
-            selected_windows = selected_windows.cpu()
-
-        with torch.no_grad():
-            result = self.pipeline.embed(selected_windows)
-
-        embeddings = result[0] if isinstance(result, tuple) else result
-        pooled = _pool_embeddings(embeddings, self.pooling).to(dtype=torch.float32)
+        selected_windows = normalized_windows[:, selected_indices, :]
+        pooled = self._embed_selected_windows(selected_windows).to(dtype=torch.float32)
         self.embedding_dim = int(pooled.shape[-1])
         if as_tensor:
             target_device = (
@@ -646,7 +1021,7 @@ def embed_dataframe(
     *,
     lookback: int,
     frame_bound: Sequence[int],
-    feature_columns: Sequence[str],
+    feature_names: Sequence[str] | None = None,
     selected_columns: Sequence[str] | None = None,
     selected_indices: Sequence[int] | None = None,
     output_prefix: str = "chronos_",
@@ -655,7 +1030,9 @@ def embed_dataframe(
     pooling: PoolingMode = "mean",
     device_map: str = "auto",
     dtype: torch.dtype = torch.float32,
-    drop_feature_columns: bool = False,
+    embed_batch_size: int = 256,
+    cache_size: int | None = None,
+    drop_feature_names: bool = False,
 ) -> Any:
     """Build a trimmed offline Chronos dataframe for dataframe-backed envs.
 
@@ -677,11 +1054,12 @@ def embed_dataframe(
         lookback: Number of rows per rolling window.
         frame_bound: Two-element slice describing the environment span to
             support. The helper uses the preceding ``lookback`` rows as history.
-        feature_columns: Raw dataframe columns to read before optional feature
-            selection is applied inside ``ChronosEmbedder``.
-        selected_columns: Optional subset of ``feature_columns`` to embed by
+        feature_names: Raw dataframe columns to read before optional feature
+            selection is applied inside ``ChronosEmbedder``. When omitted, all
+            numeric dataframe columns are used.
+        selected_columns: Optional subset of ``feature_names`` to embed by
             name.
-        selected_indices: Optional subset of ``feature_columns`` to embed by
+        selected_indices: Optional subset of ``feature_names`` to embed by
             position.
         output_prefix: Prefix for appended embedding columns.
         progress_bar: If ``True``, show the offline embedding progress.
@@ -689,8 +1067,12 @@ def embed_dataframe(
         pooling: Token pooling mode forwarded to ``ChronosEmbedder``.
         device_map: Target device for the Chronos model.
         dtype: Torch dtype used when loading Chronos.
-        drop_feature_columns: If ``True``, drop the original
-            ``feature_columns`` from the returned dataframe after embedding.
+        embed_batch_size: Batch size forwarded to Chronos embedding APIs that
+            support it.
+        cache_size: Optional LRU cache size for repeated windows. Disabled by
+            default for offline embedding.
+        drop_feature_names: If ``True``, drop the resolved source features
+            from the returned dataframe after embedding.
 
     Returns:
         A trimmed, reindexed dataframe containing one row per aligned
@@ -698,8 +1080,8 @@ def embed_dataframe(
         default.
 
     Raises:
-        ValueError: If ``lookback`` or ``frame_bound`` are invalid, or if
-            ``feature_columns`` is empty.
+        ValueError: If ``lookback`` or ``frame_bound`` are invalid, or if no
+            numeric features can be resolved.
 
     Example::
 
@@ -707,7 +1089,7 @@ def embed_dataframe(
             df,
             lookback=32,
             frame_bound=(32, len(df)),
-            feature_columns=["open", "high", "low", "close", "volume"],
+            feature_names=["open", "high", "low", "close", "volume"],
         )
         embedded.filter(like="chronos_").head()
     """
@@ -728,30 +1110,34 @@ def embed_dataframe(
             f"frame_bound[1] must be <= len(df)={len(df)}, got {frame_end}."
         )
 
-    resolved_feature_columns = [str(column) for column in feature_columns]
-    if not resolved_feature_columns:
-        raise ValueError("feature_columns must contain at least one column name.")
+    resolved_feature_names = _resolve_dataframe_feature_names(
+        df,
+        feature_names=feature_names,
+        context="Chronos embeddings",
+    )
 
     history = df.iloc[frame_start - lookback : frame_end].reset_index(drop=True).copy()
     embedder = ChronosEmbedder(
         model_name=model_name,
         pooling=pooling,
-        feature_names=resolved_feature_columns,
+        feature_names=resolved_feature_names,
         selected_columns=selected_columns,
         selected_indices=selected_indices,
         device_map=device_map,
         dtype=dtype,
+        embed_batch_size=embed_batch_size,
+        cache_size=cache_size,
     )
     transformed = embedder.transform_dataframe(
         history,
         lookback=lookback,
-        columns=resolved_feature_columns,
+        columns=resolved_feature_names,
         output_prefix=output_prefix,
         progress_bar=progress_bar,
     )
     trimmed = transformed.iloc[lookback - 1 :].reset_index(drop=True)
-    if drop_feature_columns:
-        trimmed = trimmed.drop(columns=resolved_feature_columns)
+    if drop_feature_names:
+        trimmed = trimmed.drop(columns=resolved_feature_names)
     return trimmed
 
 
@@ -799,6 +1185,8 @@ class ChronosExtractor(BaseFeaturesExtractor):
             index.
         device_map: Target device for the Chronos model.
         dtype: Torch dtype used when loading Chronos.
+        cache_size: Optional LRU cache size for repeated selected windows.
+            Defaults to ``16384`` for the online extractor.
 
     Example::
 
@@ -826,6 +1214,7 @@ class ChronosExtractor(BaseFeaturesExtractor):
         selected_indices: Sequence[int] | None = None,
         device_map: str = "auto",
         dtype: torch.dtype = torch.float32,
+        cache_size: int | None = _DEFAULT_ONLINE_CACHE_SIZE,
     ) -> None:
         super().__init__(observation_space, features_dim or 1)
 
@@ -851,6 +1240,7 @@ class ChronosExtractor(BaseFeaturesExtractor):
             selected_indices=selected_indices,
             device_map=device_map,
             dtype=dtype,
+            cache_size=cache_size,
         )
         self.selected_indices, self.selected_feature_names = self.embedder._resolve_selection(
             total_n_features=self.n_features,
@@ -864,6 +1254,7 @@ class ChronosExtractor(BaseFeaturesExtractor):
             feature_names=self.feature_names,
             as_tensor=True,
         )
+        self.embedder.clear_cache()
         self.embedding_dim = int(example_features.shape[-1])
         resolved_features_dim = (
             self.embedding_dim if features_dim is None else int(features_dim)

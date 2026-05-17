@@ -32,7 +32,7 @@ time-series windows a shared feature-extraction interface that works with both n
 [![Gymnasium](https://img.shields.io/badge/Gymnasium-0.29%2B-1f6feb?style=for-the-badge)](https://gymnasium.farama.org/)
 [![Stable-Baselines3](https://img.shields.io/badge/Stable--Baselines3-2.3%2B-f59e0b?style=for-the-badge)](https://stable-baselines3.readthedocs.io/)
 [![Chronos](https://img.shields.io/badge/Chronos-Foundation%20Model-16a34a?style=for-the-badge)](https://github.com/amazon-science/chronos-forecasting)
-[![Colab Quickstarts](https://img.shields.io/badge/Colab-6%20Quickstarts-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](#quickstart-colab-notebooks)
+[![Colab Quickstarts](https://img.shields.io/badge/Colab-7%20Quickstarts-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)](#quickstart-colab-notebooks)
 
 </div>
 
@@ -51,7 +51,7 @@ time-series windows a shared feature-extraction interface that works with both n
 
 - **Extractor-first.** Representation learning is decoupled from agent algorithms. Build and reuse feature encoders across native REINFORCE and SB3.
 - **Observation-agnostic interface.** Dense vectors, image stacks, and time-series windows inherit from `BaseFeaturesExtractor`, working with any SB3-compatible policy.
-- **Chronos support.** Chronos-2 time-series encoder integrated for both online and offline workflows via `ChronosExtractor`, `embed_dataframe`, and walk-forward PCA utilities.
+- **Chronos support.** Chronos-2 time-series encoder integrated for policy-side online, env-side online, offline, and walk-forward PCA workflows.
 - **Minimal surface.** Agents remain lightweight; complexity lives in the extractor layer where it can be tested and reused independently.
 
 ## Representation Families
@@ -60,15 +60,16 @@ time-series windows a shared feature-extraction interface that works with both n
 | --- | --- | --- | --- |
 | Flat vectors | Dense features | `(n_features,)` | `FlattenExtractor` |
 | Images | Atari-style frames | `(C, H, W)` | `AtariPreprocessor` + `NatureCNNExtractor` |
-| Time series | Rolling windows | `(lookback, n_features)` | `ChronosExtractor` or `embed_dataframe` |
+| Time series | Rolling windows or sequential observations | `(lookback, n_features)` or `(n_features,)` | `ChronosExtractor`, `WalkForwardChronosWrapper`, or `embed_dataframe` |
 
 All extractors implement SB3's `BaseFeaturesExtractor` interface, enabling reuse across native REINFORCE and Stable-Baselines3 policies.
 
 ## Chronos Workflows
 
-Chronos-2 time-series encoding supports three core APIs plus a separate walk-forward PCA stage:
+Chronos-2 time-series encoding supports policy-side, env-side, and offline workflows plus a separate walk-forward PCA stage:
 
 - `ChronosExtractor` - Online embedding within policy forward pass.
+- `WalkForwardChronosWrapper` - Env-side online embedding for environments that emit one observation at a time.
 - `embed_dataframe` - Dataframe slicing and pre-embedding for offline training.
 - `ChronosEmbedder` - Low-level embedding control for custom pipelines.
 - `walkforward_pca_dataframe` - Leakage-safe walk-forward PCA for Chronos or generic numeric dataframes.
@@ -87,6 +88,7 @@ See [Chronos implementation guide](https://github.com/cpohagwu/crosslearn/blob/m
 | [Chronos-2 + REINFORCE](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/04_gym-anytrading_reinforce_chronos2.ipynb) | Time-series encoder (online + offline) | Trading (OHLCV) |
 | [Chronos-2 + SB3](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/05_gym-anytrading_sb3_chronos2.ipynb) | Time-series encoder (online + offline) | Trading (OHLCV) |
 | [Chronos-2 + Walk-Forward PCA](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/06_gym-anytrading_reinforce_chronos2_walkforward_pca.ipynb) | Time-series encoder with adaptive PCA | Trading (OHLCV) |
+| [CityLearn + Chronos SAC](https://colab.research.google.com/github/cpohagwu/crosslearn/blob/main/examples/07_cityLearn_quickstart.ipynb) | ChronosExtractor and env-side Chronos wrapper | Building energy control |
 
 ## Installation
 
@@ -128,7 +130,7 @@ from crosslearn import REINFORCE, make_vec_env
 from crosslearn.extractors import ChronosExtractor
 
 LOOKBACK = 30
-FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+FEATURE_NAMES = ["Open", "High", "Low", "Close", "Volume"]
 SELECTED_COLUMNS = ["Close", "Volume"]
 FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
 
@@ -137,7 +139,7 @@ def online_process_data(env):
     start = env.frame_bound[0] - env.window_size
     end = env.frame_bound[1]
     prices = env.df.loc[:, "Close"].to_numpy()[start:end]
-    signal_features = env.df.loc[:, FEATURE_COLUMNS].to_numpy(dtype=np.float32)[start:end]
+    signal_features = env.df.loc[:, FEATURE_NAMES].to_numpy(dtype=np.float32)[start:end]
     return prices, signal_features
 
 
@@ -177,7 +179,7 @@ from crosslearn import REINFORCE, make_vec_env
 from crosslearn.extractors import embed_dataframe
 
 LOOKBACK = 30
-FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+FEATURE_NAMES = ["Open", "High", "Low", "Close", "Volume"]
 SELECTED_COLUMNS = ["Close", "Volume"]
 FRAME_BOUND = (LOOKBACK, len(STOCKS_GOOGL))
 
@@ -185,7 +187,7 @@ offline_df = embed_dataframe(
     STOCKS_GOOGL,
     lookback=LOOKBACK,
     frame_bound=FRAME_BOUND,
-    feature_columns=FEATURE_COLUMNS,
+    feature_names=FEATURE_NAMES,
     selected_columns=SELECTED_COLUMNS,
     progress_bar=True,
 )
