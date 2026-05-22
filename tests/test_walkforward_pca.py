@@ -71,13 +71,13 @@ def _make_pca_dataframe():
 def _manual_initial_projection(
     values: np.ndarray,
     *,
-    warmup: int,
+    min_history: int,
     explained_variance_threshold: float,
     standardize: bool,
     solver: str = "svd",
 ) -> tuple[np.ndarray, int]:
-    history = values[:warmup].astype(np.float64)
-    target = values[warmup].astype(np.float64)
+    history = values[:min_history].astype(np.float64)
+    target = values[min_history].astype(np.float64)
     return _manual_projection_from_history(
         history,
         target,
@@ -151,7 +151,7 @@ def _align_projection_signs(
 
 
 def test_make_walkforward_windows_builds_history_target_pairs() -> None:
-    windows = pca_module._make_walkforward_windows(total_rows=8, warmup=3)
+    windows = pca_module._make_walkforward_windows(total_rows=8, min_history=3)
 
     np.testing.assert_array_equal(
         windows[:4],
@@ -262,7 +262,7 @@ def test_walkforward_pca_transformer_matches_manual_first_projection() -> None:
         dtype=np.float32,
     )
     transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         device="cpu",
@@ -272,7 +272,7 @@ def test_walkforward_pca_transformer_matches_manual_first_projection() -> None:
     projected = transformer.walkforward_transform(values)
     expected_first, expected_n_components = _manual_initial_projection(
         values,
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
     )
@@ -293,7 +293,7 @@ def test_walkforward_pca_transformer_center_only_matches_manual_first_projection
         dtype=np.float32,
     )
     transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.9,
         standardize=False,
         device="cpu",
@@ -303,7 +303,7 @@ def test_walkforward_pca_transformer_center_only_matches_manual_first_projection
     projected = transformer.walkforward_transform(values)
     expected_first, expected_n_components = _manual_initial_projection(
         values,
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.9,
         standardize=False,
     )
@@ -326,14 +326,14 @@ def test_walkforward_pca_transformer_batching_matches_rowwise_cpu() -> None:
         dtype=np.float32,
     )
     rowwise = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         device="cpu",
         batch_size=1,
     )
     batched = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         device="cpu",
@@ -360,7 +360,7 @@ def test_walkforward_pca_transformer_covariance_solver_matches_svd() -> None:
         dtype=np.float32,
     )
     svd_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver="svd",
@@ -369,7 +369,7 @@ def test_walkforward_pca_transformer_covariance_solver_matches_svd() -> None:
         batch_size=2,
     )
     covariance_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver="covariance_eigh",
@@ -403,11 +403,11 @@ def test_walkforward_pca_transformer_rolling_matches_manual_projection() -> None
         dtype=np.float32,
     )
     transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver="svd",
-        expanding_warmup=False,
+        expanding_window=False,
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=1,
@@ -448,21 +448,21 @@ def test_walkforward_pca_transformer_rolling_covariance_solver_matches_svd() -> 
         dtype=np.float32,
     )
     svd_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver="svd",
-        expanding_warmup=False,
+        expanding_window=False,
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
     )
     covariance_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver="covariance_eigh",
-        expanding_warmup=False,
+        expanding_window=False,
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
@@ -494,7 +494,7 @@ def test_walkforward_pca_transformer_float32_compute_matches_float64() -> None:
         dtype=np.float32,
     )
     float64_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver="covariance_eigh",
@@ -503,7 +503,7 @@ def test_walkforward_pca_transformer_float32_compute_matches_float64() -> None:
         batch_size=2,
     )
     float32_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver="covariance_eigh",
@@ -532,14 +532,14 @@ def test_walkforward_pca_transformer_n_components_can_narrow_threshold_width() -
         dtype=np.float32,
     )
     baseline = WalkForwardPCATransformer(
-        warmup=4,
+        min_history=4,
         explained_variance_threshold=1.0,
         standardize=False,
         device="cpu",
         batch_size=2,
     )
     narrowed = WalkForwardPCATransformer(
-        warmup=4,
+        min_history=4,
         explained_variance_threshold=1.0,
         n_components=1,
         standardize=False,
@@ -575,7 +575,7 @@ def test_walkforward_pca_transformer_n_components_equal_threshold_matches_defaul
         dtype=np.float32,
     )
     baseline = WalkForwardPCATransformer(
-        warmup=4,
+        min_history=4,
         explained_variance_threshold=1.0,
         standardize=False,
         device="cpu",
@@ -585,7 +585,7 @@ def test_walkforward_pca_transformer_n_components_equal_threshold_matches_defaul
     assert baseline.n_components_ is not None
 
     explicit = WalkForwardPCATransformer(
-        warmup=4,
+        min_history=4,
         explained_variance_threshold=1.0,
         n_components=baseline.n_components_,
         standardize=False,
@@ -610,7 +610,7 @@ def test_walkforward_pca_transformer_n_components_above_threshold_raises() -> No
         dtype=np.float32,
     )
     transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         n_components=999,
         standardize=True,
@@ -625,7 +625,7 @@ def test_walkforward_pca_transformer_n_components_above_threshold_raises() -> No
 def test_walkforward_pca_transformer_validates_n_components(n_components: int) -> None:
     with pytest.raises(ValueError, match="n_components must be a positive integer"):
         WalkForwardPCATransformer(
-            warmup=3,
+            min_history=3,
             n_components=n_components,
             device="cpu",
         )
@@ -637,44 +637,44 @@ def test_walkforward_pca_dataframe_appends_and_trims_columns() -> None:
     full = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
         drop_feature_names=False,
-        trim_warmup=False,
+        trim_initial_history=False,
     )
     full_with_nan_warmup = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
         drop_feature_names=False,
-        return_transformed_warmup=False,
-        trim_warmup=False,
+        return_initial_history=False,
+        trim_initial_history=False,
     )
     trimmed = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
         drop_feature_names=True,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
     trimmed_without_warmup_scores = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         output_prefix="pca_",
         drop_feature_names=True,
-        return_transformed_warmup=False,
-        trim_warmup=True,
+        return_initial_history=False,
+        trim_initial_history=True,
     )
 
     pca_columns = [column for column in full.columns if column.startswith("pca_")]
@@ -702,11 +702,11 @@ def test_walkforward_pca_dataframe_uses_all_numeric_features_when_names_are_omit
 
     transformed = walkforward_pca_dataframe(
         df,
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         drop_feature_names=True,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
 
     assert "Symbol" in transformed.columns
@@ -720,14 +720,14 @@ def test_walkforward_pca_dataframe_n_components_controls_output_columns() -> Non
     transformed = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=4,
+        min_history=4,
         explained_variance_threshold=1.0,
         n_components=1,
         standardize=False,
         device="cpu",
         output_prefix="pca_",
         drop_feature_names=True,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
 
     assert list(transformed.columns) == ["pca_0"]
@@ -742,16 +742,16 @@ def test_walkforward_pca_dataframe_returns_initial_warmup_fit_transform() -> Non
     transformed = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         batch_size=2,
-        trim_warmup=False,
+        trim_initial_history=False,
     )
     pca_columns = [column for column in transformed.columns if column.startswith("pca_")]
 
     transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.99,
         standardize=True,
         device="cpu",
@@ -773,18 +773,18 @@ def test_walkforward_pca_dataframe_exact_warmup_length_handles_trim_modes() -> N
     full = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
-        trim_warmup=False,
+        trim_initial_history=False,
     )
     trimmed = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
-        trim_warmup=True,
+        trim_initial_history=True,
     )
 
     pca_columns = [column for column in full.columns if column.startswith("pca_")]
@@ -801,20 +801,20 @@ def test_walkforward_pca_dataframe_batching_matches_rowwise_cpu() -> None:
     rowwise = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         batch_size=1,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
     batched = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         batch_size=3,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
 
     np.testing.assert_allclose(
@@ -830,24 +830,24 @@ def test_walkforward_pca_dataframe_covariance_solver_matches_svd() -> None:
     svd_result = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         solver="svd",
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
     covariance_result = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         solver="covariance_eigh",
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
 
     np.testing.assert_allclose(
@@ -866,26 +866,26 @@ def test_walkforward_pca_dataframe_rolling_matches_rowwise_cpu() -> None:
     rowwise = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         solver="svd",
-        expanding_warmup=False,
+        expanding_window=False,
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=1,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
     batched = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         solver="svd",
-        expanding_warmup=False,
+        expanding_window=False,
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=3,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
 
     np.testing.assert_allclose(
@@ -904,7 +904,7 @@ def test_walkforward_pca_dataframe_progress_bar_matches_default(
     base = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         batch_size=2,
@@ -912,7 +912,7 @@ def test_walkforward_pca_dataframe_progress_bar_matches_default(
     with_progress = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         batch_size=2,
@@ -933,7 +933,7 @@ def test_walkforward_pca_dataframe_progress_bar_tracks_rows(monkeypatch) -> None
     transformed = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         device="cpu",
         batch_size=2,
@@ -973,7 +973,7 @@ def test_walkforward_pca_dataframe_progress_bar_requires_tqdm(
         walkforward_pca_dataframe(
             df,
             feature_names=["Open", "Close", "Volume"],
-            warmup=3,
+            min_history=3,
             standardize=True,
             device="cpu",
             progress_bar=True,
@@ -1008,7 +1008,7 @@ def test_walkforward_pca_sign_alignment_stabilizes_component_orientation(
         dtype=np.float32,
     )
     transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.9,
         standardize=False,
         device="cpu",
@@ -1030,7 +1030,7 @@ def test_walkforward_pca_transformer_auto_resolves_to_cpu_when_cuda_unavailable(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.9,
         standardize=True,
         device="auto",
@@ -1040,7 +1040,7 @@ def test_walkforward_pca_transformer_auto_resolves_to_cpu_when_cuda_unavailable(
 
 
 @pytest.mark.parametrize(
-    ("solver", "expanding_warmup"),
+    ("solver", "expanding_window"),
     [
         ("svd", True),
         ("svd", False),
@@ -1051,7 +1051,7 @@ def test_walkforward_pca_transformer_auto_resolves_to_cpu_when_cuda_unavailable(
 def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
     fake_chronos,
     solver: str,
-    expanding_warmup: bool,
+    expanding_window: bool,
 ) -> None:
     df = _make_pca_dataframe()
     lookback = 3
@@ -1072,17 +1072,17 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         feature_names=[
             column for column in embedded.columns if column.startswith("chronos_")
         ],
-        warmup=warmup,
+        min_history=warmup,
         explained_variance_threshold=0.99,
         standardize=True,
         solver=solver,
-        expanding_warmup=expanding_warmup,
+        expanding_window=expanding_window,
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
         output_prefix="pca_",
         drop_feature_names=True,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
     expected = expected_df.filter(like="pca_").to_numpy(dtype=np.float32)
 
@@ -1099,7 +1099,7 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
         feature_names=feature_names,
         selected_columns=["Close", "Volume"],
         solver=solver,
-        expanding_window=expanding_warmup,
+        expanding_window=expanding_window,
         compute_dtype=torch.float64,
         device_map="cpu",
     )
@@ -1143,7 +1143,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
     expected_df = walkforward_pca_dataframe(
         embedded,
         feature_names=[column for column in embedded.columns if column.startswith("chronos_")],
-        warmup=warmup,
+        min_history=warmup,
         explained_variance_threshold=0.99,
         n_components=1,
         standardize=True,
@@ -1152,7 +1152,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
         batch_size=2,
         output_prefix="pca_",
         drop_feature_names=True,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
     expected = expected_df.filter(like="pca_").to_numpy(dtype=np.float32)
 
@@ -1484,7 +1484,7 @@ def test_walkforward_pca_transformer_cuda_matches_cpu(solver: str) -> None:
     )
 
     cpu_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver=solver,
@@ -1493,7 +1493,7 @@ def test_walkforward_pca_transformer_cuda_matches_cpu(solver: str) -> None:
         batch_size=2,
     )
     cuda_transformer = WalkForwardPCATransformer(
-        warmup=3,
+        min_history=3,
         explained_variance_threshold=0.95,
         standardize=True,
         solver=solver,
@@ -1517,24 +1517,24 @@ def test_walkforward_pca_dataframe_cuda_matches_cpu(solver: str) -> None:
     cpu_result = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         solver=solver,
         compute_dtype=torch.float64,
         device="cpu",
         batch_size=2,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
     cuda_result = walkforward_pca_dataframe(
         df,
         feature_names=["Open", "Close", "Volume"],
-        warmup=3,
+        min_history=3,
         standardize=True,
         solver=solver,
         compute_dtype=torch.float64,
         device="cuda",
         batch_size=2,
-        trim_warmup=True,
+        trim_initial_history=True,
     )
 
     np.testing.assert_allclose(

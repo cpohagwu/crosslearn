@@ -20,7 +20,7 @@ The Chronos integration is designed around one idea: the reinforcement-learning 
 
 - `ChronosExtractor` is the online path. It receives batched observations, converts them into rolling windows if needed, runs Chronos embeddings, pools the token-level outputs, and returns one feature vector per observation.
 - `WalkForwardChronosWrapper` is the env-side online path. It collects single observations into a rolling or expanding history and returns Chronos vectors directly from the environment.
-- `embed_dataframe` is the high-level offline path. It slices the requested dataframe history, runs Chronos embedding over rolling windows, trims the alignment warmup rows, and returns the aligned dataframe you hand to an offline environment.
+- `embed_dataframe` is the high-level offline path. It slices the requested dataframe history, runs Chronos embedding over rolling windows, trims the leading alignment rows, and returns the aligned dataframe you hand to an offline environment.
 - `ChronosEmbedder` is the lower-level utility underneath these paths. It takes windows directly or derives them from a dataframe, embeds them in batches, and can append aligned embedding columns back into the dataframe.
 
 The APIs share the same normalization, feature-selection, pooling, and Chronos loading logic.
@@ -37,7 +37,7 @@ It is responsible for:
 - slicing the exact dataframe history needed for the requested window range
 - creating an internal `ChronosEmbedder`
 - appending aligned Chronos embedding columns
-- trimming the first `lookback - 1` warmup rows
+- trimming the first `lookback - 1` alignment rows
 - optionally dropping the resolved source features after the aligned `chronos_*` columns have been appended
 - returning the trimmed dataframe with both the original columns and aligned `chronos_*` columns
 
@@ -92,7 +92,7 @@ Key options:
 - `feature_names`: names for the per-timestep feature axis, not the flattened whole observation
 - `min_history`: number of stream observations required before returning real embeddings; defaults to `lookback`
 - `warmup_value`: placeholder value used before `min_history`
-- `expanding_window`: if `True`, embed all retained history after warmup
+- `expanding_window`: if `True`, embed all retained history after `min_history`
 - `max_history`: optional cap for expanding-window history
 - `cache_size`: LRU cache size for repeated online windows
 
@@ -203,7 +203,7 @@ The env-side Chronos flow looks like this:
 1. The wrapped environment emits one raw observation.
 2. `WalkForwardChronosWrapper` flattens and stores that observation.
 3. Until `min_history` observations are available, the wrapper returns a placeholder vector.
-4. After warmup, the wrapper builds a rolling or expanding history matrix.
+4. After `min_history`, the wrapper builds a rolling or expanding history matrix.
 5. The embedder normalizes that matrix to `(batch, n_features, lookback)`, checks the cache, and runs Chronos only for misses.
 6. The wrapper returns the pooled Chronos vector as the agent-visible observation.
 

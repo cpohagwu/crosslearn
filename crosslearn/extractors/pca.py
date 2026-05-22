@@ -88,11 +88,11 @@ def _to_numpy_float32(values: torch.Tensor) -> np.ndarray:
     return values.detach().to(device="cpu", dtype=torch.float32).numpy()
 
 
-def _make_walkforward_windows(total_rows: int, warmup: int) -> np.ndarray:
-    if total_rows <= warmup:
+def _make_walkforward_windows(total_rows: int, min_history: int) -> np.ndarray:
+    if total_rows <= min_history:
         return np.empty((0, 2), dtype=np.int64)
 
-    history_stops = np.arange(warmup, total_rows, dtype=np.int64)
+    history_stops = np.arange(min_history, total_rows, dtype=np.int64)
     target_stops = history_stops + 1
     return np.stack((history_stops, target_stops), axis=1)
 
@@ -411,12 +411,12 @@ def _fit_pca_batch_svd_rolling(
     values_compute: torch.Tensor,
     history_stops: torch.Tensor,
     *,
-    warmup: int,
+    min_history: int,
     standardize: bool,
     n_components: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    history_starts = history_stops - warmup
-    offsets = torch.arange(warmup, device=values_compute.device)
+    history_starts = history_stops - min_history
+    offsets = torch.arange(min_history, device=values_compute.device)
     history_indices = history_starts.unsqueeze(1) + offsets.unsqueeze(0)
     history_batch = values_compute[history_indices]
 
@@ -517,10 +517,10 @@ def _fit_pca_batch_covariance(
     values_compute: torch.Tensor,
     history_stops: torch.Tensor,
     *,
-    warmup: int,
+    min_history: int,
     standardize: bool,
     n_components: int,
-    expanding_warmup: bool,
+    expanding_window: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if history_stops.ndim != 1:
         raise ValueError("history_stops must be a 1D tensor.")
@@ -542,7 +542,7 @@ def _fit_pca_batch_covariance(
     )
 
     first_stop = int(history_stops[0].item())
-    first_start = 0 if expanding_warmup else first_stop - warmup
+    first_start = 0 if expanding_window else first_stop - min_history
     state = _initialize_running_statistics(
         values_compute,
         history_start=first_start,
@@ -551,7 +551,7 @@ def _fit_pca_batch_covariance(
 
     for batch_index, history_stop_value in enumerate(history_stops.tolist()):
         history_stop = int(history_stop_value)
-        history_start = 0 if expanding_warmup else history_stop - warmup
+        history_start = 0 if expanding_window else history_stop - min_history
         state = _advance_running_statistics(
             state,
             values_compute,
@@ -584,16 +584,16 @@ def _fit_pca_batch(
     values_compute: torch.Tensor,
     history_stops: torch.Tensor,
     *,
-    warmup: int,
+    min_history: int,
     standardize: bool,
     n_components: int,
     solver: Literal["svd", "covariance_eigh"],
-    expanding_warmup: bool,
+    expanding_window: bool,
     cumulative: torch.Tensor | None = None,
     cumulative_sq: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if solver == "svd":
-        if expanding_warmup:
+        if expanding_window:
             return _fit_pca_batch_svd_expanding(
                 values_compute,
                 history_stops,
@@ -605,7 +605,7 @@ def _fit_pca_batch(
         return _fit_pca_batch_svd_rolling(
             values_compute,
             history_stops,
-            warmup=warmup,
+            min_history=min_history,
             standardize=standardize,
             n_components=n_components,
         )
@@ -613,26 +613,26 @@ def _fit_pca_batch(
     return _fit_pca_batch_covariance(
         values_compute,
         history_stops,
-        warmup=warmup,
+        min_history=min_history,
         standardize=standardize,
         n_components=n_components,
-        expanding_warmup=expanding_warmup,
+        expanding_window=expanding_window,
     )
 
 
 class WalkForwardPCATransformer:
     """Walk-forward PCA with configurable solver, history, and precision.
 
-    ``fit(...)`` determines the fixed component count from the initial warmup
+    ``fit(...)`` determines the fixed component count from the initial min_history
     window. ``walkforward_transform(...)`` then keeps that width fixed while
     refitting the centering, optional standardization, and PCA loadings on
     either expanding or rolling history before projecting the next row.
 
     Args:
-        warmup: Number of initial rows used to choose the fixed PCA width and to
+        min_history: Number of initial rows used to choose the fixed PCA width and to
             fit the first PCA state. Must be at least ``2``.
         explained_variance_threshold: Cumulative explained-variance threshold
-            used on the initial warmup fit to choose ``n_components_``.
+            used on the initial-history fit to choose ``n_components_``.
         n_components: Optional fixed output width. When provided, it must be a
             positive integer less than or equal to the component count selected
             by ``explained_variance_threshold``.
@@ -642,8 +642,8 @@ class WalkForwardPCATransformer:
         solver: PCA backend. ``"svd"`` uses direct singular-value
             decomposition. ``"covariance_eigh"`` decomposes the covariance or
             correlation matrix derived from the selected history window.
-        expanding_warmup: If ``True``, fit PCA on all available past rows after
-            warmup. If ``False``, fit PCA on exactly the last ``warmup`` rows
+        expanding_window: If ``True``, fit PCA on all available past rows after
+            min_history. If ``False``, fit PCA on exactly the last ``min_history`` rows
             before each next-row projection.
         compute_dtype: Internal torch dtype used for PCA math. ``float64`` is
             the default stability path, while ``float32`` is an opt-in faster
@@ -656,10 +656,10 @@ class WalkForwardPCATransformer:
     Example::
 
         transformer = WalkForwardPCATransformer(
-            warmup=500,
+            min_history=500,
             explained_variance_threshold=0.99,
             solver="svd",
-            expanding_warmup=True,
+            expanding_window=True,
             compute_dtype=torch.float64,
             device="auto",
             batch_size=256,
@@ -671,18 +671,18 @@ class WalkForwardPCATransformer:
     def __init__(
         self,
         *,
-        warmup: int,
+        min_history: int,
         explained_variance_threshold: float = 0.99,
         n_components: int | None = None,
         standardize: bool = True,
         solver: Literal["svd", "covariance_eigh"] = "svd",
-        expanding_warmup: bool = True,
+        expanding_window: bool = True,
         compute_dtype: torch.dtype = torch.float64,
         device: str | torch.device = "auto",
         batch_size: int = _PCA_BATCH_SIZE,
     ) -> None:
-        if warmup < 2:
-            raise ValueError("warmup must be at least 2 for PCA.")
+        if min_history < 2:
+            raise ValueError("min_history must be at least 2 for PCA.")
         if not 0.0 < explained_variance_threshold <= 1.0:
             raise ValueError(
                 "explained_variance_threshold must be in the interval (0, 1]."
@@ -690,12 +690,12 @@ class WalkForwardPCATransformer:
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1.")
 
-        self.warmup = int(warmup)
+        self.min_history = int(min_history)
         self.explained_variance_threshold = float(explained_variance_threshold)
         self.n_components = _validate_requested_n_components(n_components)
         self.standardize = bool(standardize)
         self.solver = _validate_solver(solver)
-        self.expanding_warmup = bool(expanding_warmup)
+        self.expanding_window = bool(expanding_window)
         self.compute_dtype = _validate_compute_dtype(compute_dtype)
         self.device = resolve_device(device)
         self.batch_size = int(batch_size)
@@ -715,9 +715,9 @@ class WalkForwardPCATransformer:
         self.components_ = _to_numpy_float32(state.components)
 
     def fit(self, values: Any) -> "WalkForwardPCATransformer":
-        """Fit the initial warmup PCA state and choose a fixed output width.
+        """Fit the initial PCA state and choose a fixed output width.
 
-        Only the first ``warmup`` rows are used here. This method does not run
+        Only the first ``min_history`` rows are used here. This method does not run
         the full walk-forward projection loop.
 
         Args:
@@ -727,7 +727,7 @@ class WalkForwardPCATransformer:
             ``self`` with the initial PCA state populated.
 
         Raises:
-            ValueError: If fewer than ``warmup`` rows are provided or if the
+            ValueError: If fewer than ``min_history`` rows are provided or if the
                 input is not a non-empty 2D matrix.
         """
         array = _as_2d_float_tensor(
@@ -735,13 +735,13 @@ class WalkForwardPCATransformer:
             device=self.device,
             dtype=torch.float32,
         )
-        if array.shape[0] < self.warmup:
+        if array.shape[0] < self.min_history:
             raise ValueError(
-                f"Need at least warmup={self.warmup} rows, got {array.shape[0]}."
+                f"Need at least min_history={self.min_history} rows, got {array.shape[0]}."
             )
 
         initial_state = _fit_pca(
-            array[: self.warmup],
+            array[: self.min_history],
             standardize=self.standardize,
             solver=self.solver,
             compute_dtype=self.compute_dtype,
@@ -809,7 +809,7 @@ class WalkForwardPCATransformer:
         return _to_numpy_float32(_project_rows(array, self._fit_state))
 
     def fit_transform(self, values: Any) -> np.ndarray:
-        """Fit on the warmup window and run the full walk-forward projection.
+        """Fit on the min_history window and run the full walk-forward projection.
 
         This is a convenience alias for ``walkforward_transform(values)``.
 
@@ -817,7 +817,7 @@ class WalkForwardPCATransformer:
             values: 2D array-like input of shape ``(n_rows, n_features)``.
 
         Returns:
-            A ``float32`` array of shape ``(n_rows - warmup, n_components_)``.
+            A ``float32`` array of shape ``(n_rows - min_history, n_components_)``.
         """
         return self.walkforward_transform(values)
 
@@ -829,7 +829,7 @@ class WalkForwardPCATransformer:
     ) -> np.ndarray:
         """Project each row using PCA refit on past rows only.
 
-        The method first calls ``fit(...)`` on the initial warmup window to
+        The method first calls ``fit(...)`` on the initial history window to
         determine ``n_components_``. It then prepares chronological
         ``(history_stop, target_stop)`` windows once, processes those windows
         in chunks of ``batch_size``, refits PCA on the selected history window,
@@ -843,11 +843,11 @@ class WalkForwardPCATransformer:
                 even though updates happen chunk by chunk.
 
         Returns:
-            A ``float32`` array of shape ``(n_rows - warmup, n_components_)``.
+            A ``float32`` array of shape ``(n_rows - min_history, n_components_)``.
 
         Raises:
             ValueError: If the input is not a valid 2D matrix or contains fewer
-                than ``warmup`` rows.
+                than ``min_history`` rows.
         """
         array = _as_2d_float_tensor(
             values,
@@ -859,7 +859,7 @@ class WalkForwardPCATransformer:
         assert self.n_components_ is not None
         assert self._fit_state is not None
 
-        windows = _make_walkforward_windows(int(array.shape[0]), self.warmup)
+        windows = _make_walkforward_windows(int(array.shape[0]), self.min_history)
         if windows.size == 0:
             return np.empty((0, self.n_components_), dtype=np.float32)
 
@@ -868,7 +868,7 @@ class WalkForwardPCATransformer:
 
         cumulative = None
         cumulative_sq = None
-        if self.solver == "svd" and self.expanding_warmup:
+        if self.solver == "svd" and self.expanding_window:
             cumulative = torch.cumsum(values_compute, dim=0)
             cumulative_sq = (
                 torch.cumsum(values_compute.square(), dim=0)
@@ -892,11 +892,11 @@ class WalkForwardPCATransformer:
                 mean, scale, components, explained_variance_ratio = _fit_pca_batch(
                     values_compute,
                     history_stops,
-                    warmup=self.warmup,
+                    min_history=self.min_history,
                     standardize=self.standardize,
                     n_components=self.n_components_,
                     solver=self.solver,
-                    expanding_warmup=self.expanding_warmup,
+                    expanding_window=self.expanding_window,
                     cumulative=cumulative,
                     cumulative_sq=cumulative_sq,
                 )
@@ -934,30 +934,30 @@ class WalkForwardPCATransformer:
 def walkforward_pca_dataframe(
     df: Any,
     *,
-    warmup: int,
+    min_history: int,
     feature_names: Sequence[str] | None = None,
     explained_variance_threshold: float = 0.99,
     n_components: int | None = None,
     standardize: bool = True,
     solver: Literal["svd", "covariance_eigh"] = "svd",
-    expanding_warmup: bool = True,
+    expanding_window: bool = True,
     compute_dtype: torch.dtype = torch.float64,
     device: str | torch.device = "auto",
     batch_size: int = _PCA_BATCH_SIZE,
     output_prefix: str = "pca_",
     drop_feature_names: bool = False,
-    return_transformed_warmup: bool = True,
-    trim_warmup: bool = True,
+    return_initial_history: bool = True,
+    trim_initial_history: bool = True,
     progress_bar: bool = False,
 ) -> Any:
     """Append walk-forward PCA columns to a dataframe.
 
     The helper keeps the original dataframe length by default. When
-    ``return_transformed_warmup=True``, the first ``warmup`` rows in the new
-    PCA columns contain the retrospective fit-transform from the initial
-    warmup PCA fit. Those rows are not future-safe next-row projections. Set
-    ``return_transformed_warmup=False`` to leave those rows as ``NaN`` instead,
-    or set ``trim_warmup=True`` to drop them and reset the index.
+    ``return_initial_history=True``, the first ``min_history`` rows in the new
+    PCA columns contain the retrospective fit-transform from the initial PCA
+    fit. Those rows are not future-safe next-row projections. Set
+    ``return_initial_history=False`` to leave those rows as ``NaN`` instead,
+    or set ``trim_initial_history=True`` to drop them and reset the index.
 
     This function composes cleanly with ``embed_dataframe(...)``: first build
     Chronos embeddings, then run walk-forward PCA over the resulting
@@ -967,7 +967,7 @@ def walkforward_pca_dataframe(
         df: Source pandas dataframe in chronological order.
         feature_names: Numeric dataframe columns to reduce with walk-forward
             PCA. When omitted, all numeric dataframe columns are used.
-        warmup: Number of initial rows used to determine the fixed PCA width.
+        min_history: Number of initial rows used to determine the fixed PCA width.
         explained_variance_threshold: Initial cumulative explained-variance
             threshold used to choose ``n_components_``.
         n_components: Optional fixed output width. When provided, it must be a
@@ -978,8 +978,8 @@ def walkforward_pca_dataframe(
         solver: PCA backend. ``"svd"`` is the direct decomposition path.
             ``"covariance_eigh"`` solves PCA from a square covariance or
             correlation matrix derived from each history window.
-        expanding_warmup: If ``True``, fit PCA on all available past rows after
-            warmup. If ``False``, fit PCA on exactly the last ``warmup`` rows
+        expanding_window: If ``True``, fit PCA on all available past rows after
+            min_history. If ``False``, fit PCA on exactly the last ``min_history`` rows
             before each next-row projection.
         compute_dtype: Internal torch dtype used for PCA math.
         device: Torch device for PCA math. ``"auto"`` prefers CUDA when
@@ -989,11 +989,11 @@ def walkforward_pca_dataframe(
         output_prefix: Prefix for appended PCA columns.
         drop_feature_names: If ``True``, drop the resolved source features
             after adding the PCA columns.
-        return_transformed_warmup: If ``True``, populate the first ``warmup``
-            PCA rows with the initial warmup fit-transform. These rows are
+        return_initial_history: If ``True``, populate the first ``min_history``
+            PCA rows with the initial-history fit-transform. These rows are
             retrospective PCA scores, not future-safe next-row projections. If
-            ``False``, leave them as ``NaN`` when ``trim_warmup=False``.
-        trim_warmup: If ``True``, drop the leading warmup rows and reset the
+            ``False``, leave them as ``NaN`` when ``trim_initial_history=False``.
+        trim_initial_history: If ``True``, drop the leading min_history rows and reset the
             index so the returned dataframe contains only valid projections.
         progress_bar: If ``True``, show a ``tqdm`` progress bar over the
             chunked walk-forward PCA loop.
@@ -1001,8 +1001,8 @@ def walkforward_pca_dataframe(
     Returns:
         A copy of ``df`` with appended ``{output_prefix}*`` PCA columns. The
         returned dataframe has the same number of rows as ``df`` unless
-        ``trim_warmup=True``. When ``trim_warmup=False`` and
-        ``return_transformed_warmup=True``, the leading warmup PCA rows are
+        ``trim_initial_history=True``. When ``trim_initial_history=False`` and
+        ``return_initial_history=True``, the leading initial-history PCA rows are
         filled with the initial fit-transform instead of ``NaN``.
 
     Raises:
@@ -1024,14 +1024,14 @@ def walkforward_pca_dataframe(
         reduced = walkforward_pca_dataframe(
             embedded,
             feature_names=chronos_columns,
-            warmup=500,
+            min_history=500,
             explained_variance_threshold=0.99,
             solver="svd",
-            expanding_warmup=True,
+            expanding_window=True,
             compute_dtype=torch.float64,
             device="auto",
             batch_size=256,
-            trim_warmup=True,
+            trim_initial_history=True,
         )
     """
     try:
@@ -1061,20 +1061,20 @@ def walkforward_pca_dataframe(
 
     values = df.loc[:, resolved_feature_names].to_numpy(dtype=np.float32, copy=True)
     transformer = WalkForwardPCATransformer(
-        warmup=warmup,
+        min_history=min_history,
         explained_variance_threshold=explained_variance_threshold,
         n_components=n_components,
         standardize=standardize,
         solver=solver,
-        expanding_warmup=expanding_warmup,
+        expanding_window=expanding_window,
         compute_dtype=compute_dtype,
         device=device,
         batch_size=batch_size,
     )
-    warmup_projected = None
-    if return_transformed_warmup:
+    initial_history_projected = None
+    if return_initial_history:
         transformer.fit(values)
-        warmup_projected = transformer.transform(values[:warmup])
+        initial_history_projected = transformer.transform(values[:min_history])
     projected = transformer.walkforward_transform(values, progress_bar=progress_bar)
 
     if transformer.n_components_ is None:
@@ -1089,16 +1089,16 @@ def walkforward_pca_dataframe(
         columns=pca_columns,
         dtype=np.float32,
     )
-    if warmup_projected is not None and warmup_projected.size > 0:
-        pca_frame.iloc[:warmup] = warmup_projected
+    if initial_history_projected is not None and initial_history_projected.size > 0:
+        pca_frame.iloc[:min_history] = initial_history_projected
     if projected.size > 0:
-        pca_frame.iloc[warmup:] = projected
+        pca_frame.iloc[min_history:] = projected
 
     result = pd.concat([df.copy(), pca_frame], axis=1)
     if drop_feature_names:
         result = result.drop(columns=resolved_feature_names)
-    if trim_warmup:
-        result = result.iloc[warmup:].reset_index(drop=True)
+    if trim_initial_history:
+        result = result.iloc[min_history:].reset_index(drop=True)
     return result
 
 

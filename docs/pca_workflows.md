@@ -29,17 +29,17 @@ That is leakage.
 
 CrossLearn avoids that by using a walk-forward procedure:
 
-1. fit the initial PCA on the first `warmup` rows
+1. fit the initial PCA on the first `min_history` rows
 2. choose the smallest fixed `n_components` whose cumulative explained variance
    reaches `explained_variance_threshold`, unless a smaller explicit
    `n_components` is provided
-3. transform row `warmup` using only the PCA fit from rows `0 .. warmup - 1`
+3. transform row `min_history` using only the PCA fit from rows `0 .. min_history - 1`
 4. refit the mean, optional standard deviation, and PCA loadings on the chosen
    history window
 5. transform the next row
 6. repeat until the end
 
-The component count stays fixed after the initial warmup fit, but the scaling
+The component count stays fixed after the initial-history fit, but the scaling
 statistics and loadings are recomputed at every step using past rows only.
 
 ## Solvers and History Windows
@@ -52,19 +52,19 @@ CrossLearn exposes two exact PCA backends:
   eigendecomposition of the covariance or correlation matrix derived from the
   same history matrix
 
-CrossLearn also exposes two history policies through `expanding_warmup`:
+CrossLearn also exposes two history policies through `expanding_window`:
 
-- `expanding_warmup=True`:
-  fit PCA on all available past rows after warmup
-- `expanding_warmup=False`:
-  fit PCA on exactly the last `warmup` rows before each next-row projection
+- `expanding_window=True`:
+  fit PCA on all available past rows after min_history
+- `expanding_window=False`:
+  fit PCA on exactly the last `min_history` rows before each next-row projection
 
 These two knobs are independent. For example:
 
-- `solver="svd", expanding_warmup=True` is the default expanding SVD workflow
-- `solver="svd", expanding_warmup=False` is rolling-window SVD
-- `solver="covariance_eigh", expanding_warmup=True` is expanding covariance PCA
-- `solver="covariance_eigh", expanding_warmup=False` is rolling covariance PCA
+- `solver="svd", expanding_window=True` is the default expanding SVD workflow
+- `solver="svd", expanding_window=False` is rolling-window SVD
+- `solver="covariance_eigh", expanding_window=True` is expanding covariance PCA
+- `solver="covariance_eigh", expanding_window=False` is rolling covariance PCA
 
 ## Why `covariance_eigh` Uses a Square Matrix Without Padding
 
@@ -154,7 +154,7 @@ Common reasons:
 GPU utilization is more likely to improve when:
 
 - `solver="covariance_eigh"` is acceptable for the workload
-- `expanding_warmup=False` gives a fixed history height of `warmup`
+- `expanding_window=False` gives a fixed history height of `min_history`
 - `compute_dtype=torch.float32` is acceptable for the workload
 - `batch_size` is large enough to keep the device busy without exceeding
   available memory
@@ -206,8 +206,8 @@ The following settings are usually the most relevant GPU-utilization levers:
 
 - `solver="covariance_eigh"`:
   the decomposition is applied to a square `(n_features, n_features)` matrix
-- `expanding_warmup=False`:
-  every refit uses the same history length `warmup`
+- `expanding_window=False`:
+  every refit uses the same history length `min_history`
 - `compute_dtype=torch.float32`:
   often much faster on consumer GPUs than `float64`
 - larger `batch_size`:
@@ -240,12 +240,12 @@ import torch
 from crosslearn.extractors import WalkForwardPCATransformer
 
 transformer = WalkForwardPCATransformer(
-    warmup=500,
+    min_history=500,
     explained_variance_threshold=0.99,
     n_components=None,
     standardize=True,
     solver="svd",
-    expanding_warmup=True,
+    expanding_window=True,
     compute_dtype=torch.float64,
     device="auto",
     batch_size=256,
@@ -257,8 +257,8 @@ print(transformer.n_components_)
 
 Behavior:
 
-- `warmup` must be at least `2`
-- `n_components_` is chosen once from the initial warmup fit
+- `min_history` must be at least `2`
+- `n_components_` is chosen once from the initial-history fit
 - `threshold_n_components_` records the width selected by
   `explained_variance_threshold`
 - `n_components`, when provided, must be less than or equal to
@@ -268,7 +268,7 @@ Behavior:
   division by standard deviation
 - `solver="svd"` is the default stable path
 - `solver="covariance_eigh"` uses a square covariance or correlation matrix
-- `expanding_warmup=False` means rolling PCA on exactly the last `warmup` rows
+- `expanding_window=False` means rolling PCA on exactly the last `min_history` rows
 - `compute_dtype=torch.float32` is the faster but less stable option
 - `batch_size` controls how many chronological PCA windows are processed per
   offline chunk
@@ -285,19 +285,19 @@ from crosslearn.extractors import walkforward_pca_dataframe
 pca_df = walkforward_pca_dataframe(
     df,
     feature_names=["feature_a", "feature_b", "feature_c"],
-    warmup=500,
+    min_history=500,
     explained_variance_threshold=0.99,
     n_components=None,
     standardize=True,
     solver="covariance_eigh",
-    expanding_warmup=False,
+    expanding_window=False,
     compute_dtype=torch.float32,
     device="auto",
     batch_size=128,
     output_prefix="pca_",
     drop_feature_names=False,
-    return_transformed_warmup=True,
-    trim_warmup=False,
+    return_initial_history=True,
+    trim_initial_history=False,
     progress_bar=True,
 )
 ```
@@ -305,21 +305,21 @@ pca_df = walkforward_pca_dataframe(
 Key arguments:
 
 - `feature_names`: source columns to reduce
-- `warmup`: number of rows required before the first future-safe next-row
+- `min_history`: number of rows required before the first future-safe next-row
   projection is available
 - `explained_variance_threshold`: upper-bound component policy from the initial
-  warmup fit
+  min_history fit
 - `n_components`: optional smaller fixed width; it cannot exceed the threshold
   selected width
 - `solver`: `svd` or `covariance_eigh`
-- `expanding_warmup`: expanding history vs rolling history
+- `expanding_window`: expanding history vs rolling history
 - `compute_dtype`: internal PCA precision
 - `device`: torch device for PCA math
 - `batch_size`: number of chronological PCA windows processed together in the
   offline path
-- `return_transformed_warmup`: when `True`, backfills the first `warmup` PCA
-  rows with the initial warmup fit-transform
-- `trim_warmup`: drops the first `warmup` rows entirely; when `False`, the
+- `return_initial_history`: when `True`, backfills the first `min_history` PCA
+  rows with the initial-history fit-transform
+- `trim_initial_history`: drops the first `min_history` rows entirely; when `False`, the
   helper keeps the full dataframe length
 
 ## Offline Chronos + PCA
@@ -346,28 +346,28 @@ embedded_df = embed_dataframe(
 pca_df = walkforward_pca_dataframe(
     embedded_df,
     feature_names=embedded_df.filter(like="chronos_").columns.tolist(),
-    warmup=500,
+    min_history=500,
     explained_variance_threshold=0.99,
     standardize=True,
     solver="svd",
-    expanding_warmup=True,
+    expanding_window=True,
     compute_dtype=torch.float64,
     device="cpu",
     batch_size=64,
     output_prefix="pca_",
     drop_feature_names=True,
-    trim_warmup=True,
+    trim_initial_history=True,
     progress_bar=True,
 )
 ```
 
 This gives you a new dataframe whose PCA columns are leakage-safe by
-construction from row `warmup` onward. If `trim_warmup=True`, the dataset
-becomes shorter by `warmup` rows because only future-safe next-row projections
-are kept. If `trim_warmup=False`, the helper keeps the original dataframe
-length and, by default, fills the first `warmup` PCA rows with retrospective
-scores from the initial warmup fit. Set `return_transformed_warmup=False` to
-leave those warmup rows as `NaN` instead.
+construction from row `min_history` onward. If `trim_initial_history=True`, the dataset
+becomes shorter by `min_history` rows because only future-safe next-row projections
+are kept. If `trim_initial_history=False`, the helper keeps the original dataframe
+length and, by default, fills the first `min_history` PCA rows with retrospective
+scores from the initial-history fit. Set `return_initial_history=False` to
+leave those min_history rows as `NaN` instead.
 
 ## Constrained Online Chronos + PCA
 
@@ -415,12 +415,12 @@ Important constraint:
 
 Runtime behavior:
 
-- at wrapper construction, CrossLearn embeds only the warmup windows needed to
+- at wrapper construction, CrossLearn embeds only the initial-history windows needed to
   determine the fixed PCA width for dataframe-backed window environments
 - if `n_components` is provided, it must be less than or equal to the width
   selected by `explained_variance_threshold`
 - at `reset()`, it embeds the current raw window and projects it with the PCA
-  fit from the warmup embedding history
+  fit from the initial embedding history
 - at each `step()`, it appends the previously used embedding to the PCA history,
   refits PCA on either expanding or rolling history, embeds only the newly
   returned raw window, and projects only that new embedding

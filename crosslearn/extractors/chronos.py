@@ -412,8 +412,8 @@ class ChronosEmbedder:
     package does not fine-tune the Chronos weights.
 
     Feature selection happens before the batch is sent to Chronos. Provide
-    ``feature_names`` to name the raw feature axis, then optionally keep only a
-    subset with ``selected_columns`` or ``selected_indices``.
+    ``feature_names`` to name the per-timestep feature axis, then optionally
+    keep only a subset with ``selected_columns`` or ``selected_indices``.
 
     Args:
         model_name: Hugging Face or Chronos model identifier to load.
@@ -421,9 +421,9 @@ class ChronosEmbedder:
         pooling: How token-level Chronos embeddings are pooled into one vector
             per input window. ``"mean"`` averages token embeddings and
             ``"last"`` keeps the last token embedding.
-        feature_names: Optional names for the raw feature axis. These are used
-            to resolve ``selected_columns`` and to document the expected feature
-            ordering.
+        feature_names: Optional names for the per-timestep feature axis. These
+            are used to resolve ``selected_columns`` and to document the
+            expected feature ordering.
         selected_columns: Optional subset of ``feature_names`` to embed by
             name. Mutually exclusive with ``selected_indices``.
         selected_indices: Optional subset of feature positions to embed by
@@ -1041,7 +1041,7 @@ def embed_dataframe(
 
     1. slices ``df.iloc[frame_bound[0] - lookback : frame_bound[1]]``
     2. appends aligned Chronos embedding columns over that slice
-    3. drops the leading ``lookback - 1`` warmup rows
+    3. drops the leading ``lookback - 1`` alignment rows
     4. resets the index on the trimmed result
 
     The returned rows therefore align with the windowed observation stream, not
@@ -1178,7 +1178,7 @@ class ChronosExtractor(BaseFeaturesExtractor):
             supported in this extractor.
         pooling: Token pooling mode used to turn Chronos token embeddings into
             one vector per observation.
-        feature_names: Optional names for the raw feature axis.
+        feature_names: Optional names for the per-timestep feature axis.
         selected_columns: Optional subset of ``feature_names`` to embed by
             name.
         selected_indices: Optional subset of feature positions to embed by
