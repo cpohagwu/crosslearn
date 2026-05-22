@@ -73,22 +73,24 @@ Use `ChronosExtractor` when your environment observations are already rolling wi
 
 ### `WalkForwardChronosWrapper`
 
-`WalkForwardChronosWrapper` is the environment-facing online wrapper for environments that emit one observation at a time instead of a full rolling window.
+`WalkForwardChronosWrapper` is the environment-facing online wrapper for environments that emit either full Chronos windows or one timestep at a time.
 
 It is responsible for:
 
-- flattening each raw observation with Gymnasium's space utilities
-- collecting observations into a history buffer
+- using `mode="window"` for observations that already have shape `(lookback, n_features)`
+- using `mode="stream"` to flatten each timestep and collect a history buffer
 - returning a placeholder vector until `min_history` observations have been collected
 - embedding either the last `lookback` observations or the full expanding history
 - replacing the wrapped environment observation with one pooled Chronos vector
 
-Use `WalkForwardChronosWrapper` when the environment is sequential but does not naturally emit `(lookback, n_features)` windows. In SB3 workflows, place it after any environment wrappers that normalize observations or adapt the env to SB3. The policy can then use a plain `MlpPolicy` because the environment already emits Chronos vectors.
+Use `WalkForwardChronosWrapper` when you want the environment itself to emit Chronos vectors. In SB3 workflows, place it after any environment wrappers that normalize observations or adapt the env to SB3. The policy can then use a plain `MlpPolicy` because the environment already emits Chronos vectors.
 
 Key options:
 
-- `lookback`: number of recent observations used for each rolling Chronos window
-- `min_history`: number of observations required before returning real embeddings; defaults to `lookback`
+- `lookback`: Chronos window length
+- `mode`: `"auto"`, `"window"`, or `"stream"`; auto treats `(lookback, n_features)` spaces as windows and other spaces as streams
+- `feature_names`: names for the per-timestep feature axis, not the flattened whole observation
+- `min_history`: number of stream observations required before returning real embeddings; defaults to `lookback`
 - `warmup_value`: placeholder value used before `min_history`
 - `expanding_window`: if `True`, embed all retained history after warmup
 - `max_history`: optional cap for expanding-window history
@@ -116,7 +118,7 @@ Chronos does not need to see every feature column if you only want a subset of t
 
 CrossLearn supports three related inputs:
 
-- `feature_names`: names for the full feature dimension
+- `feature_names`: names for the per-timestep feature dimension
 - `selected_columns`: select features by name
 - `selected_indices`: select features by integer position
 

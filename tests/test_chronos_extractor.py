@@ -607,6 +607,30 @@ def test_walkforward_chronos_wrapper_waits_for_min_history(fake_chronos) -> None
     ]
 
 
+def test_walkforward_chronos_wrapper_embeds_window_observations_with_feature_names(
+    fake_chronos,
+) -> None:
+    wrapped = WalkForwardChronosWrapper(
+        _TinyChronosEnv(),
+        lookback=4,
+        feature_names=["Open", "High", "Low", "Close", "Volume"],
+        selected_columns=["Close", "Volume"],
+        mode="window",
+        model_name="custom/fake",
+    )
+
+    obs, _ = wrapped.reset()
+
+    assert obs.shape == wrapped.observation_space.shape
+    assert wrapped.mode == "window"
+    assert wrapped.n_features == 5
+    assert fake_chronos.last_pipeline is not None
+    assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
+        (2, 4),
+        (2, 4),
+    ]
+
+
 def test_walkforward_chronos_wrapper_allows_min_history_above_lookback(
     fake_chronos,
 ) -> None:

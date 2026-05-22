@@ -209,6 +209,47 @@ class _SequentialWindowEnv(gym.Env):
         return self._window(), float(action), terminated, False, {"position": self._position}
 
 
+class _PCAStreamEnv(gym.Env):
+    metadata = {}
+
+    def __init__(self) -> None:
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(2,),
+            dtype=np.float32,
+        )
+        self.action_space = gym.spaces.Discrete(2)
+        self._observations = np.array(
+            [
+                [1.0, 10.0],
+                [2.0, 11.0],
+                [3.0, 12.0],
+                [4.0, 13.0],
+                [5.0, 14.0],
+                [6.0, 15.0],
+            ],
+            dtype=np.float32,
+        )
+        self._index = 0
+
+    def reset(self, *, seed: int | None = None, options=None):
+        super().reset(seed=seed)
+        self._index = 0
+        return self._observations[self._index].copy(), {}
+
+    def step(self, action: int):
+        self._index = min(self._index + 1, len(self._observations) - 1)
+        terminated = self._index >= len(self._observations) - 1
+        return (
+            self._observations[self._index].copy(),
+            float(action),
+            terminated,
+            False,
+            {"index": self._index},
+        )
+
+
 def test_walkforward_pca_transformer_matches_manual_first_projection() -> None:
     values = np.array(
         [
@@ -1054,11 +1095,11 @@ def test_walkforward_chronos_pca_wrapper_matches_explicit_offline_pipeline(
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=lookback,
-        warmup=warmup,
+        min_history=warmup,
         feature_names=feature_names,
         selected_columns=["Close", "Volume"],
         solver=solver,
-        expanding_warmup=expanding_warmup,
+        expanding_window=expanding_warmup,
         compute_dtype=torch.float64,
         device_map="cpu",
     )
@@ -1124,7 +1165,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_bounded_n_components(
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=lookback,
-        warmup=warmup,
+        min_history=warmup,
         feature_names=feature_names,
         selected_columns=["Close", "Volume"],
         n_components=1,
@@ -1158,7 +1199,7 @@ def test_walkforward_chronos_pca_wrapper_rejects_n_components_above_threshold(
         WalkForwardChronosPCAWrapper(
             env,
             lookback=lookback,
-            warmup=warmup,
+            min_history=warmup,
             feature_names=["Open", "Close", "Volume"],
             selected_columns=["Close", "Volume"],
             n_components=999,
@@ -1169,7 +1210,7 @@ def test_walkforward_chronos_pca_wrapper_rejects_n_components_above_threshold(
 @pytest.mark.parametrize(
     ("df_length", "frame_bound", "match"),
     [
-        (6, (5, 6), r"frame_bound\[0\] must be at least lookback \+ warmup"),
+        (6, (5, 6), r"frame_bound\[0\] must be at least lookback \+ min_history"),
         (6, (6, 6), r"frame_bound\[1\] must be greater than frame_bound\[0\]"),
         (6, (6, 5), r"frame_bound\[1\] must be greater than frame_bound\[0\]"),
     ],
@@ -1192,7 +1233,7 @@ def test_walkforward_chronos_pca_wrapper_validates_boundary_requirements(
         WalkForwardChronosPCAWrapper(
             env,
             lookback=3,
-            warmup=3,
+            min_history=3,
             feature_names=["Open", "Close", "Volume"],
             selected_columns=["Close", "Volume"],
             device_map="cpu",
@@ -1214,7 +1255,7 @@ def test_walkforward_chronos_pca_wrapper_accepts_exact_minimum_dataset(
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=lookback,
-        warmup=warmup,
+        min_history=warmup,
         feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cpu",
@@ -1247,7 +1288,7 @@ def test_walkforward_chronos_pca_wrapper_uses_all_numeric_features_when_names_ar
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=lookback,
-        warmup=warmup,
+        min_history=warmup,
         selected_columns=["Close", "Volume"],
         device_map="cpu",
     )
@@ -1257,6 +1298,50 @@ def test_walkforward_chronos_pca_wrapper_uses_all_numeric_features_when_names_ar
     assert [tuple(call.shape) for call in fake_chronos.last_pipeline.calls] == [
         (warmup, 2, lookback),
     ]
+
+
+def test_walkforward_chronos_pca_wrapper_supports_dataframe_free_stream_mode(
+    fake_chronos,
+) -> None:
+    wrapped = WalkForwardChronosPCAWrapper(
+        _PCAStreamEnv(),
+        lookback=2,
+        min_history=3,
+        n_components=1,
+        mode="stream",
+        model_name="custom/fake",
+        device_map="cpu",
+    )
+
+    obs, _ = wrapped.reset()
+    np.testing.assert_allclose(obs, np.zeros_like(obs))
+
+    obs, *_ = wrapped.step(0)
+    np.testing.assert_allclose(obs, np.zeros_like(obs))
+    obs, *_ = wrapped.step(0)
+    np.testing.assert_allclose(obs, np.zeros_like(obs))
+    obs, *_ = wrapped.step(0)
+    np.testing.assert_allclose(obs, np.zeros_like(obs))
+
+    obs, *_ = wrapped.step(0)
+    assert obs.shape == (1,)
+    assert not np.allclose(obs, np.zeros_like(obs))
+    assert wrapped.fit_source == "online"
+    assert wrapped.mode == "stream"
+
+
+def test_walkforward_chronos_pca_wrapper_online_mode_requires_n_components(
+    fake_chronos,
+) -> None:
+    with pytest.raises(ValueError, match="requires explicit n_components"):
+        WalkForwardChronosPCAWrapper(
+            _PCAStreamEnv(),
+            lookback=2,
+            min_history=3,
+            mode="stream",
+            model_name="custom/fake",
+            device_map="cpu",
+        )
 
 
 def test_walkforward_chronos_pca_wrapper_embeds_only_one_new_window_per_step(
@@ -1275,7 +1360,7 @@ def test_walkforward_chronos_pca_wrapper_embeds_only_one_new_window_per_step(
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=lookback,
-        warmup=warmup,
+        min_history=warmup,
         feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cpu",
@@ -1327,7 +1412,7 @@ def test_walkforward_chronos_pca_wrapper_requests_tensor_embeddings_on_cpu(
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=lookback,
-        warmup=warmup,
+        min_history=warmup,
         feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cpu",
@@ -1368,7 +1453,7 @@ def test_walkforward_chronos_pca_wrapper_supports_split_devices(
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=3,
-        warmup=3,
+        min_history=3,
         feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         device_map="cuda",
@@ -1481,7 +1566,7 @@ def test_walkforward_chronos_pca_wrapper_cuda_returns_numpy_observations(
     wrapped = WalkForwardChronosPCAWrapper(
         env,
         lookback=lookback,
-        warmup=warmup,
+        min_history=warmup,
         feature_names=["Open", "Close", "Volume"],
         selected_columns=["Close", "Volume"],
         solver=solver,

@@ -389,12 +389,13 @@ from crosslearn.envs import WalkForwardChronosPCAWrapper
 wrapped_env = WalkForwardChronosPCAWrapper(
     env,
     lookback=30,
-    warmup=500,
+    min_history=500,
+    mode="window",
     feature_names=["Open", "High", "Low", "Close", "Volume"],
     selected_columns=["Close", "Volume"],
     n_components=None,
     solver="covariance_eigh",
-    expanding_warmup=False,
+    expanding_window=False,
     compute_dtype=torch.float32,
     device_map="auto",
     pca_device="cpu",
@@ -403,17 +404,19 @@ wrapped_env = WalkForwardChronosPCAWrapper(
 
 Important constraint:
 
-- by design, the first `lookback + warmup` observations are skipped
+- for dataframe-backed window environments, the first `lookback + min_history` observations are skipped
 - the first agent-visible observation is the next one after that skipped prefix
-- `frame_bound[0]` must therefore be at least `lookback + warmup`
+- `frame_bound[0]` must therefore be at least `lookback + min_history`
 - `frame_bound[1]` must be greater than `frame_bound[0]`
 - for a plain dataset with no extra slicing, that means you need at least
-  `lookback + warmup + 1` rows to get one projected observation
+  `lookback + min_history + 1` rows to get one projected observation
+- for dataframe-free stream environments, PCA is fit from live Chronos
+  embeddings and `n_components` must be explicit
 
 Runtime behavior:
 
 - at wrapper construction, CrossLearn embeds only the warmup windows needed to
-  determine the fixed PCA width
+  determine the fixed PCA width for dataframe-backed window environments
 - if `n_components` is provided, it must be less than or equal to the width
   selected by `explained_variance_threshold`
 - at `reset()`, it embeds the current raw window and projects it with the PCA
